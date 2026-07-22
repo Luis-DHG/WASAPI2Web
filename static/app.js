@@ -7,7 +7,6 @@
  *  4. Jitter buffer adaptativo con timestamps del server (medicion de jitter).
  *  5. Crossfade en underrun (10ms).
  *  6. EQ 3 bandas (BiquadFilterNode low/mid/high).
- *  7. Visualizador forma de onda (AnalyserNode + canvas).
  *  8. Panel de ajustes con persistencia en localStorage.
  *  9. Reconexion automatica exponencial + RTT ping/pong.
  * 10. Telemetria cliente -> servidor (stats JSON).
@@ -21,14 +20,12 @@
   // ---- Config defaults + persistencia ----
   const SETTINGS_KEY = "pyab_settings_v1";
   const DEFAULT_SETTINGS = {
-    vol: 100,
-    latency: 120,       // ms objetivo
+    latency: 120,
     mono: false,
-    rate: 0,            // 0 = auto (device rate)
-    codec: "pcm",       // pcm | mulaw
-    skip: true,         // skip silencio
-    eqLow: 0, eqMid: 0, eqHigh: 0,  // dB
-    visualizer: "wave", // wave | vu | off
+    rate: 0,
+    codec: "pcm",
+    skip: true,
+    eqLow: 0, eqMid: 0, eqHigh: 0,
     autoReconnect: true,
   };
 
@@ -73,10 +70,9 @@
   // ---- DOM ----
   const $ = (id) => document.getElementById(id);
   const playBtn = $("playBtn");
-  const playIcon = $("playIcon");
   const playLabel = $("playLabel");
+  const hintCtx = $("hintCtx");
   const wsBadge = $("wsBadge");
-  const deviceLbl = $("deviceLbl");
   const stState = $("stState");
   const stBuffer = $("stBuffer");
   const stUnderrun = $("stUnderrun");
@@ -85,17 +81,21 @@
   const stLoss = $("stLoss");
   const stCodec = $("stCodec");
   const stFmt = $("stFmt");
+  const stDevice = $("stDevice");
   const latencyLbl = $("latencyLbl");
   const eqLowLbl = $("eqLowLbl");
   const eqMidLbl = $("eqMidLbl");
   const eqHighLbl = $("eqHighLbl");
-  const latencyHint = $("latencyHint");
-  const inputLevel = $("inputLevel");
-  const canvas = $("viz");
-  const canvasCtx = canvas ? canvas.getContext("2d") : null;
   const settingsBtn = $("settingsBtn");
+  const settingsClose = $("settingsClose");
+  const settingsBackdrop = $("settingsBackdrop");
   const settingsPanel = $("settingsPanel");
-  const vol = $("vol");
+  const statsBtn = $("statsBtn");
+  const statsClose = $("statsClose");
+  const statsBackdrop = $("statsBackdrop");
+  const statsPanel = $("statsPanel");
+  const eqToggle = $("eqToggle");
+  const eqBody = $("eqBody");
   const latencySlider = $("latencySlider");
   const codecSel = $("codecSel");
   const monoChk = $("monoChk");
@@ -103,14 +103,12 @@
   const eqLow = $("eqLow");
   const eqMid = $("eqMid");
   const eqHigh = $("eqHigh");
-  const visSel = $("visSel");
   const reconnectChk = $("reconnectChk");
 
   // ---- Estado ----
   let audioCtx = null;
   let gainNode = null;
   let eqLowNode = null, eqMidNode = null, eqHighNode = null;
-  let analyser = null;
   let ws = null;
   let connected = false;
   let playing = false;
@@ -134,7 +132,6 @@
   let jitterSamples = [];
   let lastTsMs = 0;
   let clockOffsetMs = 0;           // server_ts - local_perf
-  let vizRafId = 0;
   let blockDurMsPrev = 0;
 
   // Pool de AudioBufferSourceNode (-40% GC en Android)
@@ -167,12 +164,12 @@
     playing = isPlaying;
     if (isPlaying) {
       playBtn.classList.add("playing");
-      playIcon.innerHTML = "&#9209;";
       playLabel.textContent = "ACTIVO";
+      if (hintCtx) hintCtx.textContent = "Escuchando el audio del PC";
     } else {
       playBtn.classList.remove("playing");
-      playIcon.innerHTML = "&#9654;";
-      playLabel.textContent = "INICIAR";
+      playLabel.textContent = "ESCUCHAR";
+      if (hintCtx) hintCtx.textContent = "Toca para escuchar el audio del PC";
     }
   }
   function log() {
@@ -181,11 +178,11 @@
     console.log.apply(console, args);
   }
 
-  // ---- Configuración del audio graph (EQ + gain + analyser) ----
+  // ---- Configuración del audio graph (EQ + gain) ----
   function buildAudioGraph() {
     if (audioCtx == null) return;
 
-    // chain: source -> eqLow -> eqMid -> eqHigh -> gain -> analyser -> destination
+    // chain: source -> eqLow -> eqMid -> eqHigh -> gain -> destination
     eqLowNode = audioCtx.createBiquadFilter();
     eqLowNode.type = "lowshelf";
     eqLowNode.frequency.value = 250;
@@ -203,17 +200,12 @@
     eqHighNode.gain.value = settings.eqHigh;
 
     gainNode = audioCtx.createGain();
-    gainNode.gain.value = (settings.vol / 100) * (settings.vol / 100);  // curva exponencial
-
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.7;
+    gainNode.gain.value = 1.0;
 
     eqLowNode.connect(eqMidNode);
     eqMidNode.connect(eqHighNode);
     eqHighNode.connect(gainNode);
-    gainNode.connect(analyser);
-    analyser.connect(audioCtx.destination);
+    gainNode.connect(audioCtx.destination);
   }
 
   // ---- WebSocket ----
@@ -236,7 +228,7 @@
       blockSeqSeen = -1;
       blocksLost = 0;
       clockOffsetMs = 0;
-      setWsBadge("WS conectado", "live");
+      setWsBadge("Conectado", "live");
       log("WS abierto:", url);
       startHeartbeat();
     };
@@ -251,7 +243,7 @@
 
     ws.onclose = function () {
       connected = false;
-      setWsBadge("WS desconectado", "off");
+      setWsBadge("Desconectado", "off");
       log("WS cerrado.");
       stopHeartbeat();
       if (settings.autoReconnect) scheduleReconnect();
@@ -272,13 +264,11 @@
     }
     if (text.startsWith("device:")) {
       deviceName = text.slice(7).trim();
-      deviceLbl.textContent = "dispositivo: " + deviceName;
+      if (stDevice) stDevice.textContent = deviceName;
       return;
     }
     if (text.startsWith("level:")) {
-      const lvl = parseFloat(text.slice(6)) || 0;
-      updateInputLevel(lvl);
-      return;
+      return; // nivel server-side ignorado en UI minimalista
     }
   }
 
@@ -519,8 +509,6 @@
 
     // Actualiza display periodicamente
     updateStatsDisplay();
-    // Inicia visualizador si no esta corriendo
-    if (!vizRafId && settings.visualizer !== "off") startVisualizer();
   }
 
   function scheduleSilence() {
@@ -547,71 +535,6 @@
     const buffered = Math.max(0, nextPlayTime - audioCtx.currentTime);
     stBuffer.textContent = Math.round(buffered * 1000) + " ms";
   }
-  // ---- Visualizador ----
-  function startVisualizer() {
-    if (!analyser || !canvas || !canvasCtx) {
-      stopVisualizer();
-      return;
-    }
-    const draw = function () {
-      vizRafId = requestAnimationFrame(draw);
-      if (settings.visualizer === "off") {
-        clearCanvas();
-        return;
-      }
-      const w = canvas.width, h = canvas.height;
-      if (settings.visualizer === "wave") {
-        const bufLen = analyser.fftSize;
-        const data = new Uint8Array(bufLen);
-        analyser.getByteTimeDomainData(data);
-        canvasCtx.fillStyle = "rgba(11,15,26,0.35)";
-        canvasCtx.fillRect(0, 0, w, h);
-        canvasCtx.lineWidth = 2;
-        canvasCtx.strokeStyle = "#2dd4bf";
-        canvasCtx.beginPath();
-        const slice = w / bufLen;
-        let x = 0;
-        for (let i = 0; i < bufLen; i++) {
-          const v = data[i] / 128.0;
-          const y = (v * h) / 2;
-          if (i === 0) canvasCtx.moveTo(x, y);
-          else canvasCtx.lineTo(x, y);
-          x += slice;
-        }
-        canvasCtx.stroke();
-      } else if (settings.visualizer === "vu") {
-        const bufLen = analyser.frequencyBinCount;
-        const data = new Uint8Array(bufLen);
-        analyser.getByteFrequencyData(data);
-        // RMS via datos
-        let sum = 0;
-        for (let i = 0; i < bufLen; i++) sum += data[i] * data[i];
-        const rms = Math.sqrt(sum / bufLen) / 255;
-        clearCanvas();
-        const barW = w * Math.min(1, rms * 2);
-        canvasCtx.fillStyle = rms > 0.7 ? "#f87171" : "#2dd4bf";
-        canvasCtx.fillRect(0, h - 8, barW, 8);
-      }
-    };
-    vizRafId = requestAnimationFrame(draw);
-  }
-
-  function stopVisualizer() {
-    if (vizRafId) cancelAnimationFrame(vizRafId);
-    vizRafId = 0;
-    clearCanvas();
-  }
-
-  function clearCanvas() {
-    if (!canvas || !canvasCtx) return;
-    canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
-  }
-
-  function updateInputLevel(lvl) {
-    if (!inputLevel) return;
-    const pct = Math.min(100, Math.round(lvl * 200));
-    inputLevel.style.width = pct + "%";
-  }
 
   // ---- WakeLock ----
   async function requestWakeLock() {
@@ -632,18 +555,17 @@
 
   // ---- UI: boton play ----
   function togglePlay() {
+    try { navigator.vibrate(10); } catch (e) {}
     if (playing) {
       if (audioCtx) {
         audioCtx.close().catch(function () {});
         audioCtx = null;
         gainNode = null;
         eqLowNode = eqMidNode = eqHighNode = null;
-        analyser = null;
       }
       setPlaying(false);
       setState("idle", false);
       stBuffer.textContent = "0 ms";
-      stopVisualizer();
       releaseWakeLock();
       log("Reproduccion detenida.");
       return;
@@ -680,7 +602,6 @@
 
   // ---- Panel de ajustes ----
   function applySettingsToUi() {
-    vol.value = settings.vol;
     latencySlider.value = settings.latency;
     if (latencyLbl) latencyLbl.textContent = settings.latency;
     codecSel.value = settings.codec;
@@ -692,20 +613,13 @@
     if (eqLowLbl) eqLowLbl.textContent = settings.eqLow;
     if (eqMidLbl) eqMidLbl.textContent = settings.eqMid;
     if (eqHighLbl) eqHighLbl.textContent = settings.eqHigh;
-    visSel.value = settings.visualizer;
     reconnectChk.checked = settings.autoReconnect;
   }
 
   function bindSettings() {
-    vol.addEventListener("input", function () {
-      settings.vol = parseInt(vol.value, 10);
-      if (gainNode) gainNode.gain.value = (settings.vol / 100) * (settings.vol / 100);
-      saveSettings(settings);
-    });
     latencySlider.addEventListener("input", function () {
       settings.latency = parseInt(latencySlider.value, 10);
       if (latencyLbl) latencyLbl.textContent = settings.latency;
-      if (latencyHint) latencyHint.textContent = settings.latency < 100 ? "agil" : (settings.latency > 250 ? "robusto" : "estable");
       saveSettings(settings);
     });
     codecSel.addEventListener("change", function () {
@@ -741,11 +655,6 @@
       if (eqHighNode) eqHighNode.gain.value = settings.eqHigh;
       saveSettings(settings);
     });
-    visSel.addEventListener("change", function () {
-      settings.visualizer = visSel.value;
-      saveSettings(settings);
-      if (settings.visualizer === "off") stopVisualizer();
-    });
     reconnectChk.addEventListener("change", function () {
       settings.autoReconnect = reconnectChk.checked;
       saveSettings(settings);
@@ -755,12 +664,49 @@
   function reconnect(reason) {
     log("Reconexion solicitada:", reason);
     if (ws) { try { ws.close(); } catch (e) {} }
-    // onclose se encarga de reconectar.
   }
 
-  if (settingsBtn) {
+  // ---- Overlay helpers ----
+  function openOverlay(backdrop, panel) {
+    if (backdrop) backdrop.classList.add("open");
+    if (panel) panel.classList.add("open");
+  }
+  function closeOverlay(backdrop, panel) {
+    if (backdrop) backdrop.classList.remove("open");
+    if (panel) panel.classList.remove("open");
+  }
+
+  if (settingsBtn && settingsBackdrop && settingsPanel) {
     settingsBtn.addEventListener("click", function () {
-      settingsPanel.classList.toggle("open");
+      try { navigator.vibrate(10); } catch (e) {}
+      openOverlay(settingsBackdrop, settingsPanel);
+    });
+    settingsClose.addEventListener("click", function () {
+      closeOverlay(settingsBackdrop, settingsPanel);
+    });
+    settingsBackdrop.addEventListener("click", function (e) {
+      if (e.target === settingsBackdrop) closeOverlay(settingsBackdrop, settingsPanel);
+    });
+  }
+
+  if (statsBtn && statsBackdrop && statsPanel) {
+    statsBtn.addEventListener("click", function () {
+      try { navigator.vibrate(10); } catch (e) {}
+      openOverlay(statsBackdrop, statsPanel);
+    });
+    statsClose.addEventListener("click", function () {
+      closeOverlay(statsBackdrop, statsPanel);
+    });
+    statsBackdrop.addEventListener("click", function (e) {
+      if (e.target === statsBackdrop) closeOverlay(statsBackdrop, statsPanel);
+    });
+  }
+
+  // D.3 EQ toggle colapsable
+  if (eqToggle && eqBody) {
+    eqToggle.addEventListener("click", function () {
+      eqToggle.classList.toggle("open");
+      eqBody.classList.toggle("open");
     });
   }
 
