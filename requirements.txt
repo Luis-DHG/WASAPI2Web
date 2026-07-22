@@ -1,0 +1,3 @@
+PyAudioWPatch>=0.2.12.8
+websockets>=12.0
+aiohttp>=3.9.0

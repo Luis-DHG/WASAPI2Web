@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#0b0f1a">
+  <title>PyAudioBridge</title>
+  <style>
+    :root {
+      --bg: #0b0f1a;
+      --fg: #e6edf3;
+      --muted: #7d8590;
+      --accent: #2dd4bf;
+      --danger: #f87171;
+      --card: #131a26;
+      --border: #2a3344;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      overscroll-behavior: none;
+      touch-action: manipulation;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: space-between;
+      padding: 24px 18px;
+      min-height: 100dvh;
+    }
+    header {
+      text-align: center;
+      width: 100%;
+    }
+    header h1 {
+      font-size: 1.4rem;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+    header p {
+      color: var(--muted);
+      font-size: 0.85rem;
+      margin-top: 4px;
+    }
+
+    main {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+    }
+    .play-btn {
+      width: 220px;
+      height: 220px;
+      border-radius: 50%;
+      border: none;
+      background: radial-gradient(circle at 30% 30%, #1bd1c5, #0f8c84);
+      color: #04201f;
+      font-size: 1.5rem;
+      font-weight: 700;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      cursor: pointer;
+      box-shadow: 0 0 40px rgba(45, 212, 191, 0.35), inset 0 -10px 30px rgba(0,0,0,0.25);
+      transition: transform 0.12s ease, box-shadow 0.2s ease;
+      user-select: none;
+    }
+    .play-btn:active { transform: scale(0.96); }
+    .play-btn.playing {
+      background: radial-gradient(circle at 30% 30%, #f87171, #b91c1c);
+      color: #fff;
+      box-shadow: 0 0 40px rgba(248, 113, 113, 0.35), inset 0 -10px 30px rgba(0,0,0,0.3);
+    }
+    .play-btn .icon { font-size: 3rem; line-height: 1; }
+    .play-btn .label { font-size: 0.95rem; }
+
+    footer {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+    .stat {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 8px;
+      text-align: center;
+    }
+    .stat .k { color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px; }
+    .stat .v { font-size: 1.1rem; font-weight: 600; margin-top: 2px; }
+    .stat .v.ok { color: var(--accent); }
+    .stat .v.bad { color: var(--danger); }
+
+    .badge {
+      display: inline-block;
+      font-size: 0.75rem;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .badge.live { color: var(--accent); border-color: var(--accent); }
+    .badge.recon { color: #fbbf24; border-color: #fbbf24; }
+    .badge.off { color: var(--danger); border-color: var(--danger); }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    input[type=range] { accent-color: var(--accent); width: 100%; }
+    .vol-wrap { width: 100%; }
+    label { font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>PyAudioBridge</h1>
+    <p>WASAPI Loopback &rarr; WebSocket &rarr; Web Audio</p>
+  </header>
+
+  <main>
+    <button id="playBtn" class="play-btn" aria-label="Iniciar reproduccion">
+      <span class="icon" id="playIcon">&#9654;</span>
+      <span class="label" id="playLabel">INICIAR</span>
+    </button>
+  </main>
+
+  <footer>
+    <div class="row">
+      <span id="wsBadge" class="badge off">WS desconectado</span>
+      <span id="deviceLbl" class="badge">dispositivo: ?</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="k">Estado</div><div class="v ok" id="stState">idle</div></div>
+      <div class="stat"><div class="k">Buffer</div><div class="v" id="stBuffer">0 ms</div></div>
+      <div class="stat"><div class="k">Underruns</div><div class="v" id="stUnderrun">0</div></div>
+    </div>
+    <div class="vol-wrap">
+      <label for="vol">Volumen</label>
+      <input type="range" id="vol" min="0" max="100" value="100">
+    </div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
