@@ -14,8 +14,18 @@
       --muted: #7d8590;
       --accent: #2dd4bf;
       --danger: #f87171;
+      --warn: #fbbf24;
       --card: #131a26;
       --border: #2a3344;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f6f8fa;
+        --fg: #1f2328;
+        --muted: #59636e;
+        --card: #ffffff;
+        --border: #d0d7de;
+      }
     }
     * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
     html, body {
@@ -31,113 +41,106 @@
       flex-direction: column;
       align-items: center;
       justify-content: space-between;
-      padding: 24px 18px;
+      padding: 18px 14px;
       min-height: 100dvh;
+      gap: 12px;
     }
-    header {
-      text-align: center;
-      width: 100%;
+    header { text-align: center; width: 100%; position: relative; }
+    header h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: 0.5px; }
+    header p { color: var(--muted); font-size: 0.85rem; margin-top: 4px; }
+    #settingsBtn {
+      position: absolute; top: -4px; right: 0;
+      background: var(--card); border: 1px solid var(--border);
+      color: var(--fg); width: 40px; height: 40px; border-radius: 10px;
+      font-size: 1.2rem; cursor: pointer; display: flex; align-items: center; justify-content: center;
     }
-    header h1 {
-      font-size: 1.4rem;
-      font-weight: 600;
-      letter-spacing: 0.5px;
-    }
-    header p {
-      color: var(--muted);
-      font-size: 0.85rem;
-      margin-top: 4px;
+    #settingsBtn:active { transform: scale(0.92); }
+
+    /* Visualizador */
+    .viz-wrap { width: 100%; height: 80px; background: var(--card); border: 1px solid var(--border);
+      border-radius: 12px; overflow: hidden; position: relative; }
+    #viz { display: block; width: 100%; height: 100%; }
+    .input-level-bar {
+      position: absolute; bottom: 0; left: 0; height: 4px;
+      background: var(--accent); transition: width 0.15s ease; width: 0%;
     }
 
     main {
-      flex: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 100%;
+      flex: 1; display: flex; align-items: center; justify-content: center; width: 100%;
     }
     .play-btn {
-      width: 220px;
-      height: 220px;
-      border-radius: 50%;
-      border: none;
+      width: 200px; height: 200px; border-radius: 50%; border: none;
       background: radial-gradient(circle at 30% 30%, #1bd1c5, #0f8c84);
-      color: #04201f;
-      font-size: 1.5rem;
-      font-weight: 700;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      cursor: pointer;
-      box-shadow: 0 0 40px rgba(45, 212, 191, 0.35), inset 0 -10px 30px rgba(0,0,0,0.25);
+      color: #04201f; font-size: 1.5rem; font-weight: 700;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+      cursor: pointer; user-select: none;
+      box-shadow: 0 0 40px rgba(45,212,191,0.35), inset 0 -10px 30px rgba(0,0,0,0.25);
       transition: transform 0.12s ease, box-shadow 0.2s ease;
-      user-select: none;
+    }
+    @media (max-height: 700px) {
+      .play-btn { width: 160px; height: 160px; }
     }
     .play-btn:active { transform: scale(0.96); }
     .play-btn.playing {
-      background: radial-gradient(circle at 30% 30%, #f87171, #b91c1c);
-      color: #fff;
-      box-shadow: 0 0 40px rgba(248, 113, 113, 0.35), inset 0 -10px 30px rgba(0,0,0,0.3);
+      background: radial-gradient(circle at 30% 30%, #f87171, #b91c1c); color: #fff;
+      box-shadow: 0 0 40px rgba(248,113,113,0.35), inset 0 -10px 30px rgba(0,0,0,0.3);
     }
     .play-btn .icon { font-size: 3rem; line-height: 1; }
     .play-btn .label { font-size: 0.95rem; }
 
-    footer {
-      width: 100%;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
+    footer { width: 100%; display: flex; flex-direction: column; gap: 10px; }
     .stats {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 10px;
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
     }
     .stat {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 10px 8px;
-      text-align: center;
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 12px; padding: 8px 6px; text-align: center;
     }
-    .stat .k { color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px; }
-    .stat .v { font-size: 1.1rem; font-weight: 600; margin-top: 2px; }
+    .stat .k { color: var(--muted); font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.5px; }
+    .stat .v { font-size: 1rem; font-weight: 600; margin-top: 2px; }
     .stat .v.ok { color: var(--accent); }
     .stat .v.bad { color: var(--danger); }
 
     .badge {
-      display: inline-block;
-      font-size: 0.75rem;
-      padding: 2px 8px;
-      border-radius: 999px;
-      background: var(--card);
-      border: 1px solid var(--border);
-      color: var(--muted);
+      display: inline-block; font-size: 0.72rem; padding: 2px 8px;
+      border-radius: 999px; background: var(--card); border: 1px solid var(--border); color: var(--muted);
     }
     .badge.live { color: var(--accent); border-color: var(--accent); }
-    .badge.recon { color: #fbbf24; border-color: #fbbf24; }
+    .badge.recon { color: var(--warn); border-color: var(--warn); }
     .badge.off { color: var(--danger); border-color: var(--danger); }
 
-    .row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      font-size: 0.8rem;
-      color: var(--muted);
-    }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 0.8rem; color: var(--muted); }
     input[type=range] { accent-color: var(--accent); width: 100%; }
     .vol-wrap { width: 100%; }
     label { font-size: 0.75rem; }
+
+    /* Panel de ajustes collapsable */
+    #settingsPanel {
+      max-height: 0; overflow: hidden; transition: max-height 0.25s ease;
+      background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+      padding: 0 12px;
+    }
+    #settingsPanel.open { max-height: 700px; padding: 12px; }
+    #settingsPanel h3 { font-size: 0.9rem; margin-bottom: 8px; color: var(--fg); }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .field { margin-bottom: 10px; }
+    .field label { display: block; margin-bottom: 2px; }
+    .field select, .field input[type=range] { width: 100%; }
+    .field input[type=checkbox] { margin-right: 6px; }
+    .hint { font-size: 0.7rem; color: var(--muted); margin-top: 4px; }
   </style>
 </head>
 <body>
   <header>
     <h1>PyAudioBridge</h1>
     <p>WASAPI Loopback &rarr; WebSocket &rarr; Web Audio</p>
+    <button id="settingsBtn" aria-label="Ajustes">&#9881;</button>
   </header>
+
+  <div class="viz-wrap">
+    <canvas id="viz" width="600" height="80"></canvas>
+    <div class="input-level-bar" id="inputLevel"></div>
+  </div>
 
   <main>
     <button id="playBtn" class="play-btn" aria-label="Iniciar reproduccion">
@@ -154,11 +157,66 @@
     <div class="stats">
       <div class="stat"><div class="k">Estado</div><div class="v ok" id="stState">idle</div></div>
       <div class="stat"><div class="k">Buffer</div><div class="v" id="stBuffer">0 ms</div></div>
+      <div class="stat"><div class="k">RTT</div><div class="v" id="stRtt">?</div></div>
       <div class="stat"><div class="k">Underruns</div><div class="v" id="stUnderrun">0</div></div>
     </div>
+    <div class="stats">
+      <div class="stat"><div class="k">Jitter P95</div><div class="v" id="stJitter">?</div></div>
+      <div class="stat"><div class="k">Paquetes perdidos</div><div class="v" id="stLoss">0</div></div>
+      <div class="stat"><div class="k">Codec</div><div class="v" id="stCodec" style="font-size:0.85rem">pcm</div></div>
+      <div class="stat"><div class="k">Rate/ch</div><div class="v" id="stFmt" style="font-size:0.85rem">?</div></div>
+    </div>
     <div class="vol-wrap">
-      <label for="vol">Volumen</label>
+      <label for="vol">Volumen (curva exponencial)</label>
       <input type="range" id="vol" min="0" max="100" value="100">
+    </div>
+
+    <div id="settingsPanel">
+      <h3>Ajustes</h3>
+      <div class="grid2">
+        <div class="field">
+          <label for="codecSel">Codec</label>
+          <select id="codecSel">
+            <option value="pcm">PCM 16-bit (calidad max)</option>
+            <option value="mulaw">mu-law 8-bit (menos ancho banda)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="visSel">Visualizador</label>
+          <select id="visSel">
+            <option value="wave">Forma de onda</option>
+            <option value="vu">VU meter</option>
+            <option value="off">Off</option>
+          </select>
+        </div>
+        <div class="field" style="grid-column: span 2;">
+          <label>Latencia objetivo: <span id="latencyLbl">120</span> ms (<span id="latencyHint">estable</span>)</label>
+          <input type="range" id="latencySlider" min="50" max="500" step="10" value="120">
+        </div>
+        <div class="field" style="grid-column: span 2;">
+          <label>EQ: Low <span id="eqLowLbl">0</span> dB</label>
+          <input type="range" id="eqLow" min="-12" max="12" step="1" value="0">
+        </div>
+        <div class="field" style="grid-column: span 2;">
+          <label>EQ: Mid <span id="eqMidLbl">0</span> dB</label>
+          <input type="range" id="eqMid" min="-12" max="12" step="1" value="0">
+        </div>
+        <div class="field" style="grid-column: span 2;">
+          <label>EQ: High <span id="eqHighLbl">0</span> dB</label>
+          <input type="range" id="eqHigh" min="-12" max="12" step="1" value="0">
+        </div>
+        <div class="field">
+          <label><input type="checkbox" id="monoChk"> Solo mono (menos banda)</label>
+        </div>
+        <div class="field">
+          <label><input type="checkbox" id="skipChk" checked> Skip silencio</label>
+        </div>
+        <div class="field">
+          <label><input type="checkbox" id="reconnectChk" checked> Auto-reconnect</label>
+        </div>
+      </div>
+      <div class="hint">Cambios de codec/mono/skip reconectan el WS automaticamente.</div>
+      <div class="hint">Atajos: <kbd>Space</kbd>=play/stop, <kbd>M</kbd>=mono toggle.</div>
     </div>
   </footer>
 
