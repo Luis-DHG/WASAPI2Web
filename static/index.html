@@ -5,220 +5,361 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="theme-color" content="#0b0f1a">
+  <meta name="theme-color" content="#0F0F23">
   <title>PyAudioBridge</title>
   <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+
     :root {
-      --bg: #0b0f1a;
-      --fg: #e6edf3;
-      --muted: #7d8590;
-      --accent: #2dd4bf;
-      --danger: #f87171;
-      --warn: #fbbf24;
-      --card: #131a26;
-      --border: #2a3344;
+      --bg: #0F0F23;
+      --bg-elev: #1B1B30;
+      --fg: #F8FAFC;
+      --fg-muted: #94A3B8;
+      --accent: #F97316;
+      --accent-dim: rgba(249, 115, 22, 0.2);
+      --danger: #EF4444;
+      --warn: #FBBF24;
+      --border: rgba(67, 56, 202, 0.4);
+      --focus: #4338CA;
     }
-    @media (prefers-color-scheme: light) {
-      :root {
-        --bg: #f6f8fa;
-        --fg: #1f2328;
-        --muted: #59636e;
-        --card: #ffffff;
-        --border: #d0d7de;
-      }
-    }
+
     * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
     html, body {
       height: 100%;
       background: var(--bg);
       color: var(--fg);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
       overscroll-behavior: none;
       touch-action: manipulation;
+      -webkit-font-smoothing: antialiased;
     }
+
     body {
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: space-between;
-      padding: 18px 14px;
+      justify-content: center;
+      padding: 24px 18px;
       min-height: 100dvh;
-      gap: 12px;
-    }
-    header { text-align: center; width: 100%; position: relative; }
-    header h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: 0.5px; }
-    header p { color: var(--muted); font-size: 0.85rem; margin-top: 4px; }
-    #settingsBtn {
-      position: absolute; top: -4px; right: 0;
-      background: var(--card); border: 1px solid var(--border);
-      color: var(--fg); width: 40px; height: 40px; border-radius: 10px;
-      font-size: 1.2rem; cursor: pointer; display: flex; align-items: center; justify-content: center;
-    }
-    #settingsBtn:active { transform: scale(0.92); }
-
-    /* Visualizador */
-    .viz-wrap { width: 100%; height: 80px; background: var(--card); border: 1px solid var(--border);
-      border-radius: 12px; overflow: hidden; position: relative; }
-    #viz { display: block; width: 100%; height: 100%; }
-    .input-level-bar {
-      position: absolute; bottom: 0; left: 0; height: 4px;
-      background: var(--accent); transition: width 0.15s ease; width: 0%;
+      padding-top: max(24px, env(safe-area-inset-top));
+      padding-bottom: max(24px, env(safe-area-inset-bottom));
     }
 
+    /* Header: solo titulo + chips top-right (B.1:inicar ) */
+    header {
+      position: fixed;
+      top: max(16px, env(safe-area-inset-top));
+      left: 0; right: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 18px;
+      z-index: 10;
+    }
+    header h1 {
+      font-size: 1rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      opacity: 0.6;
+    }
+    .top-chips {
+      display: flex; gap: 8px; align-items: center;
+    }
+    .icon-btn {
+      background: transparent;
+      border: none;
+      color: var(--fg-muted);
+      width: 40px; height: 40px;
+      border-radius: 10px;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: color 200ms ease, background 200ms ease;
+    }
+    .icon-btn:active { transform: scale(0.92); }
+    .icon-btn:hover { color: var(--fg); }
+
+    .icon-svg {
+      width: 24px; height: 24px;
+      stroke: currentColor; fill: none;
+      stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .icon-svg.large { width: 64px; height: 64px; stroke-width: 1.8; }
+
+    /* Boton principal centrado */
     main {
-      flex: 1; display: flex; align-items: center; justify-content: center; width: 100%;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      gap: 24px;
     }
     .play-btn {
-      width: 200px; height: 200px; border-radius: 50%; border: none;
-      background: radial-gradient(circle at 30% 30%, #1bd1c5, #0f8c84);
-      color: #04201f; font-size: 1.5rem; font-weight: 700;
-      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+      width: 240px; height: 240px;
+      border-radius: 50%;
+      border: 2px solid var(--accent);
+      background: transparent;
+      color: var(--accent);
+      font-family: 'Inter', sans-serif;
+      font-size: 1rem; font-weight: 600; letter-spacing: 0.5px;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 16px;
       cursor: pointer; user-select: none;
-      box-shadow: 0 0 40px rgba(45,212,191,0.35), inset 0 -10px 30px rgba(0,0,0,0.25);
-      transition: transform 0.12s ease, box-shadow 0.2s ease;
+      transition: background 250ms cubic-bezier(0.4,0,0.2,1),
+                  color 250ms cubic-bezier(0.4,0,0.2,1),
+                  transform 200ms cubic-bezier(0.4,0,0.2,1);
     }
     @media (max-height: 700px) {
-      .play-btn { width: 160px; height: 160px; }
+      .play-btn { width: 180px; height: 180px; }
+      .icon-svg.large { width: 48px; height: 48px; }
     }
-    .play-btn:active { transform: scale(0.96); }
-    .play-btn.playing {
-      background: radial-gradient(circle at 30% 30%, #f87171, #b91c1c); color: #fff;
-      box-shadow: 0 0 40px rgba(248,113,113,0.35), inset 0 -10px 30px rgba(0,0,0,0.3);
-    }
-    .play-btn .icon { font-size: 3rem; line-height: 1; }
-    .play-btn .label { font-size: 0.95rem; }
+    .play-btn:active { transform: scale(0.97); }
+    .play-btn.playing { background: var(--accent); color: var(--bg); }
 
-    footer { width: 100%; display: flex; flex-direction: column; gap: 10px; }
-    .stats {
-      display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+    .hint-ctx {
+      color: var(--fg-muted);
+      font-size: 0.85rem;
+      text-align: center;
     }
-    .stat {
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: 12px; padding: 8px 6px; text-align: center;
-    }
-    .stat .k { color: var(--muted); font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.5px; }
-    .stat .v { font-size: 1rem; font-weight: 600; margin-top: 2px; }
-    .stat .v.ok { color: var(--accent); }
-    .stat .v.bad { color: var(--danger); }
 
+    /* Badges discretos top */
     .badge {
-      display: inline-block; font-size: 0.72rem; padding: 2px 8px;
-      border-radius: 999px; background: var(--card); border: 1px solid var(--border); color: var(--muted);
+      display: inline-block;
+      font-size: 0.72rem;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      color: var(--fg-muted);
+      font-weight: 500;
     }
     .badge.live { color: var(--accent); border-color: var(--accent); }
     .badge.recon { color: var(--warn); border-color: var(--warn); }
     .badge.off { color: var(--danger); border-color: var(--danger); }
 
-    .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 0.8rem; color: var(--muted); }
-    input[type=range] { accent-color: var(--accent); width: 100%; }
-    .vol-wrap { width: 100%; }
-    label { font-size: 0.75rem; }
-
-    /* Panel de ajustes collapsable */
-    #settingsPanel {
-      max-height: 0; overflow: hidden; transition: max-height 0.25s ease;
-      background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-      padding: 0 12px;
+    /* Overlay generico (B.2 + B.3) */
+    .overlay-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(15, 15, 35, 0.92);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 250ms ease-out;
+      z-index: 100;
     }
-    #settingsPanel.open { max-height: 700px; padding: 12px; }
-    #settingsPanel h3 { font-size: 0.9rem; margin-bottom: 8px; color: var(--fg); }
-    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .field { margin-bottom: 10px; }
-    .field label { display: block; margin-bottom: 2px; }
+    .overlay-backdrop.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .overlay-panel {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      background: var(--bg-elev);
+      border-top-left-radius: 20px;
+      border-top-right-radius: 20px;
+      transform: translateY(100%);
+      transition: transform 250ms cubic-bezier(0.4, 0, 0.2, 1);
+      max-height: 80dvh;
+      overflow-y: auto;
+      padding: 20px 18px max(20px, env(safe-area-inset-bottom));
+      z-index: 101;
+    }
+    .overlay-backdrop.open + .overlay-panel,
+    .overlay-backdrop.open ~ .overlay-panel {
+      transform: translateY(0);
+    }
+    .overlay-panel.open { transform: translateY(0); }
+
+    .overlay-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 16px;
+    }
+    .overlay-header h2 {
+      font-size: 1.1rem; font-weight: 700;
+    }
+    .overlay-close {
+      background: transparent; border: none; color: var(--fg-muted);
+      width: 36px; height: 36px; border-radius: 10px;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+    }
+    .overlay-close:active { transform: scale(0.92); }
+
+    /* Stats grid dentro de overlay (B.3) */
+    .stats-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+    }
+    .stat-row {
+      display: flex; justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+      font-variant-numeric: tabular-nums;
+    }
+    .stat-row .k { color: var(--fg-muted); font-size: 0.85rem; }
+    .stat-row .v { font-size: 0.95rem; font-weight: 600; }
+    .stat-row .v.ok { color: var(--accent); }
+    .stat-row .v.bad { color: var(--danger); }
+
+    /* Ajustes dentro de overlay (B.2) */
+    .field { margin-bottom: 14px; }
+    .field label { display: block; margin-bottom: 6px; font-size: 0.85rem; }
     .field select, .field input[type=range] { width: 100%; }
-    .field input[type=checkbox] { margin-right: 6px; }
-    .hint { font-size: 0.7rem; color: var(--muted); margin-top: 4px; }
+    .field input[type=checkbox] { margin-right: 8px; accent-color: var(--accent); }
+    .field input[type=range] { accent-color: var(--accent); }
+    .field select {
+      background: var(--bg); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px 10px; font-family: inherit; font-size: 0.9rem;
+    }
+
+    /* Seccion colapsable (D.3: EQ bajo Avanzado) */
+    .collapsible-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 0; cursor: pointer;
+      border-top: 1px solid var(--border);
+      color: var(--fg-muted);
+      font-size: 0.9rem; font-weight: 600;
+      user-select: none;
+    }
+    .collapsible-header .chevron {
+      transition: transform 200ms ease;
+    }
+    .collapsible-header.open .chevron { transform: rotate(180deg); }
+    .collapsible-body {
+      max-height: 0; overflow: hidden;
+      transition: max-height 250ms ease-out;
+    }
+    .collapsible-body.open { max-height: 500px; padding-top: 10px; }
+
+    .hint { font-size: 0.75rem; color: var(--fg-muted); margin-top: 8px; }
+
+    /* Focus rings (accessibilidad prioridad 1) */
+    .play-btn:focus-visible,
+    .icon-btn:focus-visible,
+    .overlay-close:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    button:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
   </style>
 </head>
 <body>
   <header>
     <h1>PyAudioBridge</h1>
-    <p>WASAPI Loopback &rarr; WebSocket &rarr; Web Audio</p>
-    <button id="settingsBtn" aria-label="Ajustes">&#9881;</button>
+    <div class="top-chips">
+      <span id="wsBadge" class="badge off">Desconectado</span>
+      <button class="icon-btn" id="statsBtn" aria-label="Estadisticas">
+        <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="12" y1="16" x2="12" y2="12"/>
+          <line x1="12" y1="8" x2="12.01" y2="8"/>
+        </svg>
+      </button>
+      <button class="icon-btn" id="settingsBtn" aria-label="Ajustes">
+        <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/>
+          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+        </svg>
+      </button>
+    </div>
   </header>
-
-  <div class="viz-wrap">
-    <canvas id="viz" width="600" height="80"></canvas>
-    <div class="input-level-bar" id="inputLevel"></div>
-  </div>
 
   <main>
     <button id="playBtn" class="play-btn" aria-label="Iniciar reproduccion">
-      <span class="icon" id="playIcon">&#9654;</span>
-      <span class="label" id="playLabel">INICIAR</span>
+      <svg class="icon-svg large" id="playIconSvg" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M8 5v14l11-7z" fill="currentColor" stroke="currentColor"/>
+      </svg>
+      <span class="label" id="playLabel">ESCUCHAR</span>
     </button>
+    <p class="hint-ctx" id="hintCtx">Toca para escuchar el audio del PC</p>
   </main>
 
-  <footer>
-    <div class="row">
-      <span id="wsBadge" class="badge off">WS desconectado</span>
-      <span id="deviceLbl" class="badge">dispositivo: ?</span>
+  <!-- Overlay de estadisticas (B.3) -->
+  <div class="overlay-backdrop" id="statsBackdrop"></div>
+  <div class="overlay-panel" id="statsPanel" role="dialog" aria-label="Estadisticas">
+    <div class="overlay-header">
+      <h2>Estadisticas</h2>
+      <button class="overlay-close" id="statsClose" aria-label="Cerrar">
+        <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
     </div>
-    <div class="stats">
-      <div class="stat"><div class="k">Estado</div><div class="v ok" id="stState">idle</div></div>
-      <div class="stat"><div class="k">Buffer</div><div class="v" id="stBuffer">0 ms</div></div>
-      <div class="stat"><div class="k">RTT</div><div class="v" id="stRtt">?</div></div>
-      <div class="stat"><div class="k">Underruns</div><div class="v" id="stUnderrun">0</div></div>
+    <div class="stat-row"><span class="k">Estado</span><span class="v ok" id="stState">idle</span></div>
+    <div class="stat-row"><span class="k">Buffer</span><span class="v" id="stBuffer">0 ms</span></div>
+    <div class="stat-row"><span class="k">RTT</span><span class="v" id="stRtt">--</span></div>
+    <div class="stat-row"><span class="k">Underruns</span><span class="v" id="stUnderrun">0</span></div>
+    <div class="stat-row"><span class="k">Jitter P95</span><span class="v" id="stJitter">--</span></div>
+    <div class="stat-row"><span class="k">Paquetes perdidos</span><span class="v" id="stLoss">0</span></div>
+    <div class="stat-row"><span class="k">Codec</span><span class="v" id="stCodec">pcm</span></div>
+    <div class="stat-row"><span class="k">Rate / canales</span><span class="v" id="stFmt">--</span></div>
+    <div class="stat-row"><span class="k">Dispositivo</span><span class="v" id="stDevice" style="font-size:0.8rem">--</span></div>
+  </div>
+
+  <!-- Overlay de ajustes (B.2) -->
+  <div class="overlay-backdrop" id="settingsBackdrop"></div>
+  <div class="overlay-panel" id="settingsPanel" role="dialog" aria-label="Ajustes">
+    <div class="overlay-header">
+      <h2>Ajustes</h2>
+      <button class="overlay-close" id="settingsClose" aria-label="Cerrar">
+        <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
     </div>
-    <div class="stats">
-      <div class="stat"><div class="k">Jitter P95</div><div class="v" id="stJitter">?</div></div>
-      <div class="stat"><div class="k">Paquetes perdidos</div><div class="v" id="stLoss">0</div></div>
-      <div class="stat"><div class="k">Codec</div><div class="v" id="stCodec" style="font-size:0.85rem">pcm</div></div>
-      <div class="stat"><div class="k">Rate/ch</div><div class="v" id="stFmt" style="font-size:0.85rem">?</div></div>
+    <div class="field">
+      <label for="codecSel">Codec</label>
+      <select id="codecSel">
+        <option value="pcm">PCM 16-bit (calidad max)</option>
+        <option value="mulaw">mu-law 8-bit (menos ancho banda)</option>
+      </select>
     </div>
-    <div class="vol-wrap">
-      <label for="vol">Volumen (curva exponencial)</label>
-      <input type="range" id="vol" min="0" max="100" value="100">
+    <div class="field">
+      <label>Latencia objetivo: <span id="latencyLbl">120</span> ms</label>
+      <input type="range" id="latencySlider" min="50" max="500" step="10" value="120">
+    </div>
+    <div class="field">
+      <label><input type="checkbox" id="monoChk"> Solo mono (menos ancho banda)</label>
+    </div>
+    <div class="field">
+      <label><input type="checkbox" id="skipChk" checked> Skip silencio (server-side)</label>
+    </div>
+    <div class="field">
+      <label><input type="checkbox" id="reconnectChk" checked> Auto-reconnect</label>
     </div>
 
-    <div id="settingsPanel">
-      <h3>Ajustes</h3>
-      <div class="grid2">
-        <div class="field">
-          <label for="codecSel">Codec</label>
-          <select id="codecSel">
-            <option value="pcm">PCM 16-bit (calidad max)</option>
-            <option value="mulaw">mu-law 8-bit (menos ancho banda)</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="visSel">Visualizador</label>
-          <select id="visSel">
-            <option value="wave">Forma de onda</option>
-            <option value="vu">VU meter</option>
-            <option value="off">Off</option>
-          </select>
-        </div>
-        <div class="field" style="grid-column: span 2;">
-          <label>Latencia objetivo: <span id="latencyLbl">120</span> ms (<span id="latencyHint">estable</span>)</label>
-          <input type="range" id="latencySlider" min="50" max="500" step="10" value="120">
-        </div>
-        <div class="field" style="grid-column: span 2;">
-          <label>EQ: Low <span id="eqLowLbl">0</span> dB</label>
-          <input type="range" id="eqLow" min="-12" max="12" step="1" value="0">
-        </div>
-        <div class="field" style="grid-column: span 2;">
-          <label>EQ: Mid <span id="eqMidLbl">0</span> dB</label>
-          <input type="range" id="eqMid" min="-12" max="12" step="1" value="0">
-        </div>
-        <div class="field" style="grid-column: span 2;">
-          <label>EQ: High <span id="eqHighLbl">0</span> dB</label>
-          <input type="range" id="eqHigh" min="-12" max="12" step="1" value="0">
-        </div>
-        <div class="field">
-          <label><input type="checkbox" id="monoChk"> Solo mono (menos banda)</label>
-        </div>
-        <div class="field">
-          <label><input type="checkbox" id="skipChk" checked> Skip silencio</label>
-        </div>
-        <div class="field">
-          <label><input type="checkbox" id="reconnectChk" checked> Auto-reconnect</label>
-        </div>
-      </div>
-      <div class="hint">Cambios de codec/mono/skip reconectan el WS automaticamente.</div>
-      <div class="hint">Atajos: <kbd>Space</kbd>=play/stop, <kbd>M</kbd>=mono toggle.</div>
+    <!-- D.3: EQ colapsable bajo "Avanzado" -->
+    <div class="collapsible-header" id="eqToggle">
+      <span>Avanzado: Ecualizador</span>
+      <svg class="icon-svg chevron" viewBox="0 0 24 24" style="width:18px;height:18px" aria-hidden="true">
+        <polyline points="6 9 12 15 18 9"/>
+      </svg>
     </div>
-  </footer>
+    <div class="collapsible-body" id="eqBody">
+      <div class="field">
+        <label>EQ Low: <span id="eqLowLbl">0</span> dB</label>
+        <input type="range" id="eqLow" min="-12" max="12" step="1" value="0">
+      </div>
+      <div class="field">
+        <label>EQ Mid: <span id="eqMidLbl">0</span> dB</label>
+        <input type="range" id="eqMid" min="-12" max="12" step="1" value="0">
+      </div>
+      <div class="field">
+        <label>EQ High: <span id="eqHighLbl">0</span> dB</label>
+        <input type="range" id="eqHigh" min="-12" max="12" step="1" value="0">
+      </div>
+    </div>
+
+    <div class="hint">Cambios de codec/mono reconectan automaticamente.</div>
+    <div class="hint">Atajos: <kbd>Space</kbd>=play/stop, <kbd>M</kbd>=mono toggle.</div>
+    <div class="hint">Algunos cambios requieren reconexion.</div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>
