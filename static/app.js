@@ -536,12 +536,18 @@
     stBuffer.textContent = Math.round(buffered * 1000) + " ms";
   }
 
-  // ---- WakeLock ----
+  // ---- WakeLock (S.4: release event -> re-solicitar) ----
   async function requestWakeLock() {
     if (!("wakeLock" in navigator)) return;
+    if (wakeLock) return; // ya activo
     try {
       wakeLock = await navigator.wakeLock.request("screen");
       log("WakeLock activo.");
+      wakeLock.addEventListener("release", function () {
+        log("WakeLock revocado por SO.");
+        wakeLock = null;
+        if (playing) requestWakeLock(); // S.4: re-solicitar agresivo
+      });
     } catch (e) {
       log("WakeLock fallo:", e);
     }
@@ -710,13 +716,38 @@
     });
   }
 
-  // Reanudar AudioContext al volver a primer plano.
-  document.addEventListener("visibilitychange", function () {
-    if (!document.hidden && audioCtx && audioCtx.state === "suspended") {
+  // S.2: Page Lifecycle API (freeze/resume) + visibilitychange fallback
+  const _onLifecycleResume = function () {
+    log("", "Lifecycle resume.");
+    releaseWakeLock();
+    if (playing) requestWakeLock();
+    if (audioCtx && audioCtx.state === "suspended") {
       audioCtx.resume().catch(function () {});
     }
-    if (!document.hidden && playing) requestWakeLock();
+    // S.5: resetear nextPlayTime si gap > 2s
+    if (audioCtx && playing) {
+      var gap = audioCtx.currentTime - nextPlayTime;
+      if (gap > 2) {
+        log("", "Gap post-suspension: " + gap.toFixed(1) + "s -> realinear.");
+        // S.3: silencio de relleno (avanzar nextPlayTime sin glitch)
+        var blockDur = blockDurMsPrev / 1000;
+        var silenceFrames = Math.round(gap / blockDur);
+        for (var k = 0; k < Math.min(silenceFrames, 20); k++) {
+          scheduleSilence();
+        }
+        nextPlayTime = audioCtx.currentTime + settings.latency / 1000;
+      }
+    }
+  };
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) _onLifecycleResume();
   });
+  if ("serviceWorker" in navigator && "onfreeze" in document) {
+    document.addEventListener("freeze", function () {
+      log("", "Lifecycle freeze. Guardando estado.");
+    });
+    document.addEventListener("resume", _onLifecycleResume);
+  }
 
   // ---- Arranque ----
   applySettingsToUi();
