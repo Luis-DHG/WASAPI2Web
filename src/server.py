@@ -35,6 +35,7 @@ try:
         FRAMES_PER_BLOCK,
     )
     from .utils import get_local_ip, format_size
+    from .errors import WSUpgradeError, CaptureError
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from src.audio_capture import (  # type: ignore[no-redef]
@@ -43,6 +44,7 @@ except ImportError:
         FRAMES_PER_BLOCK,
     )
     from src.utils import get_local_ip, format_size  # type: ignore[no-redef]
+    from src.errors import WSUpgradeError, CaptureError  # type: ignore[no-redef]
 
 log = logging.getLogger("pyaudiobridge.server")
 
@@ -142,7 +144,9 @@ class Client:
 
 def parse_client_format(query: str, device_rate: int,
                         device_channels: int) -> AudioFormat:
-    """Parsea los parametros del cliente y devuelve AudioFormat."""
+    """Parsea y valida los parametros del cliente.
+    Valores fuera de rango se clampean a defaults del dispositivo.
+    """
     from urllib.parse import parse_qs
 
     q = parse_qs(query)
@@ -151,20 +155,30 @@ def parse_client_format(query: str, device_rate: int,
         v = q.get(key)
         return v[0] if v else default
 
-    # Rate
+    # Rate — clamping a allowlist.
     try:
         rate = int(first("rate", str(device_rate)))
     except ValueError:
         rate = device_rate
     if rate not in ALLOWED_RATES:
+        log.warning("Rate %d fuera de allowlist, fallback %d", rate, device_rate)
         rate = device_rate
 
     # Channels
-    mono = first("mono", "0") in ("1", "true", "yes")
+    mono_str = first("mono", "0").lower()
+    if mono_str not in ("0", "1", "true", "false", "yes", "no"):
+        log.warning("mono=%r invalido, fallback stereo", mono_str)
+        mono = False
+    else:
+        mono = mono_str in ("1", "true", "yes")
     channels = 1 if mono else min(2, device_channels)
 
     # Codec
     codec_str = first("codec", "pcm").lower()
+    valid_codecs = ("pcm", "mulaw", "mu-law", "u-law", "g711")
+    if codec_str not in valid_codecs:
+        log.warning("codec=%r invalido, fallback pcm", codec_str)
+        codec_str = "pcm"
     codec = CODEC_MULAW if codec_str in ("mulaw", "mu-law", "u-law", "g711") \
         else CODEC_PCM
 
@@ -223,8 +237,10 @@ class AudioBridgeServer:
         self._total_dropped = 0
         self._last_level_rms = 0.0
         self._last_level_ts = 0.0
+        self._started_at: float = 0.0
 
         self.app.router.add_get("/", self.index_handler)
+        self.app.router.add_get("/health", self.health_handler)
         self.app.router.add_get("/metrics", self.metrics_handler)
         self.app.router.add_static("/static", STATIC_DIR, name="static")
         self.app.router.add_get(WS_PATH, self.ws_handler)
@@ -246,6 +262,7 @@ class AudioBridgeServer:
         self._pump_task = loop.create_task(self.broadcast_pump(), name="pump")
         self._stats_task = loop.create_task(self.stats_loop(), name="stats")
         self._level_task = loop.create_task(self.level_loop(), name="level")
+        self._started_at = time.monotonic()
         log.info("Servidor listo en puerto %d", self.port)
 
     async def _on_cleanup(self, app: web.Application) -> None:
@@ -261,6 +278,27 @@ class AudioBridgeServer:
 
     async def index_handler(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+    async def health_handler(self, request: web.Request) -> web.Response:
+        """GET /health — estado compacto JSON."""
+        uptime = (time.monotonic() - self._started_at) if self._started_at else 0.0
+        capture_ok = self.capture is not None and self.capture.is_running()
+        payload = {
+            "status": "ok" if capture_ok else "degraded",
+            "uptime_s": round(uptime, 1),
+            "clients": len(self.clients),
+            "capture": {
+                "running": capture_ok,
+                "device": self.capture.device_name if self.capture else None,
+                "rate": self.capture.device_rate if self.capture else 0,
+                "channels": self.capture.device_channels if self.capture else 0,
+            },
+            "broadcast_total": self._total_broadcast,
+            "dropped_total": self._total_dropped,
+            "capture_qsize": self.capture_queue.qsize(),
+        }
+        status_code = 200 if capture_ok else 503
+        return web.json_response(payload, status=status_code)
 
     async def metrics_handler(self, request: web.Request) -> web.Response:
         """Endpoint Prometheus-style text/plain."""
@@ -289,11 +327,11 @@ class AudioBridgeServer:
     # --- handlers WS -------------------------------------------------------
 
     async def ws_handler(self, request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse(heartbeat=20.0)
+        ws = web.WebSocketResponse(heartbeat=None)
         try:
             await ws.prepare(request)
         except Exception:
-            raise web.HTTPBadRequest(text="Se requiere WebSocket upgrade")
+            raise WSUpgradeError()
 
         query = request.query_string
         self._client_counter += 1
@@ -554,40 +592,65 @@ class AudioBridgeServer:
         log.info("=== PyAudioBridge ===")
         log.info("IP local: %s", local_ip)
         log.info("Movil:    http://%s:%d", local_ip, self.port)
+        log.info("Health:   http://%s:%d/health", local_ip, self.port)
         log.info("Metrics:  http://%s:%d/metrics", local_ip, self.port)
         log.info("WS URL:    ws://%s:%d%s", local_ip, self.port, WS_PATH)
         log.info("Static:   %s", STATIC_DIR)
         try:
             web.run_app(
                 self.app, host="0.0.0.0", port=self.port,
-                access_log=None,
+                access_log=None, shutdown_timeout=5.0, handle_signals=True,
             )
         except TypeError:
-            # Variantes antiguas/futuras de aiohttp sin print kwarg.
-            web.run_app(self.app, host="0.0.0.0", port=self.port)
+            web.run_app(
+                self.app, host="0.0.0.0", port=self.port,
+                shutdown_timeout=5,
+            )
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    """Configura logging estructurado en formato JSON lines."""
+    import json
+    from datetime import datetime, timezone
+
+    class JsonFormatter(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            payload: dict[str, object] = {
+                "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                "level": record.levelname,
+                "logger": record.name,
+                "msg": record.getMessage(),
+            }
+            if record.exc_info and record.exc_info[1] is not None:
+                payload["exc"] = self.formatException(record.exc_info)
+            return json.dumps(payload, ensure_ascii=False)
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter())
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
 
 
 def main() -> None:
     configure_logging()
     server = AudioBridgeServer(port=HTTP_PORT)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+
+    # Windows: SIGINT -> KeyboardInterrupt. CTRL_BREAK_EVENT maneja PortAudio.
     try:
         signal.signal(signal.SIGINT, signal.SIG_DFL)
     except Exception:
         pass
+
     try:
         server.run()
     except KeyboardInterrupt:
-        log.info("Cerrando (KeyboardInterrupt).")
+        log.info("Cerrando (KeyboardInterrupt) — graceful shutdown iniciado.")
+    except Exception as exc:
+        log.exception("Cierre inesperado: %s", exc)
+    finally:
+        log.info("Servidor detenido.")
 
 
 if __name__ == "__main__":

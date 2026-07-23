@@ -250,6 +250,14 @@ class WasapiLoopbackCapture:
             except Exception:
                 pass
             self._stream = None
+
+    def is_running(self) -> bool:
+        """True si la hebra de captura está viva y no marcada para parar."""
+        return (
+            self._thread is not None
+            and self._thread.is_alive()
+            and not self._stop.is_set()
+        )
         if self._pa is not None:
             try:
                 self._pa.terminate()
