@@ -315,9 +315,8 @@
     </div>
     <div class="field">
       <label for="codecSel">Codec</label>
-      <select id="codecSel">
-        <option value="pcm">PCM 16-bit (calidad max)</option>
-        <option value="mulaw">mu-law 8-bit (menos ancho banda)</option>
+      <select id="codecSel" disabled>
+        <option value="pcm">PCM 16-bit</option>
       </select>
     </div>
     <div class="field">
@@ -360,6 +359,8 @@
     <div class="hint">Atajos: <kbd>Space</kbd>=play/stop, <kbd>M</kbd>=mono toggle.</div>
     <div class="hint">Algunos cambios requieren reconexion.</div>
   </div>
+
+  <audio id="outEl" hidden></audio>
 
   <script src="/static/app.js"></script>
 </body>
