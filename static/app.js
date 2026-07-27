@@ -536,13 +536,25 @@
     stBuffer.textContent = Math.round(buffered * 1000) + " ms";
   }
 
-  // ---- WakeLock (S.4: release event -> re-solicitar) ----
+  // ---- WakeLock (S.4: release event -> re-solicitar)
+  // Usa 'system' (Chrome 125+) — evita suspensión de CPU sin mantener pantalla encendida.
+  // Fallback a 'screen' si 'system' no soportado.
   async function requestWakeLock() {
     if (!("wakeLock" in navigator)) return;
     if (wakeLock) return; // ya activo
     try {
-      wakeLock = await navigator.wakeLock.request("screen");
-      log("WakeLock activo.");
+      var supported = false;
+      try {
+        supported = navigator.wakeLock.request("system") !== undefined;
+      } catch (e) {
+        supported = e.name !== "NotSupportedError" && e.name !== "TypeError";
+      }
+      if (supported) {
+        wakeLock = await navigator.wakeLock.request("system");
+      } else {
+        wakeLock = await navigator.wakeLock.request("screen");
+      }
+      log("WakeLock activo (" + (supported ? "system" : "screen") + ").");
       wakeLock.addEventListener("release", function () {
         log("WakeLock revocado por SO.");
         wakeLock = null;
