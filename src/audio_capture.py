@@ -1,28 +1,26 @@
 """Captura WASAPI Loopback con PyAudioWPatch + pipeline de procesamiento.
 
 Hebra dedicada lee bloques PCM del loopback del dispositivo de salida por
-defecto. Un `BlockProcessor` aplica transformaciones (mono mix, downsample,
-mu-law, timestamps, skip silencio) segun la configuracion negociada por el
-servidor para cada cliente, y publica bloques listos para enviar en una
-cola asyncio.
+defecto. Un `BlockProcessor` aplica mono mix, RMS, skip silencio y timestamps
+segun la configuracion negociada por el servidor para cada cliente, y publica
+bloques listos para enviar en una cola asyncio.
 
 Diseno:
   - Captura siempre el rate nativo del dispositivo (WASAPI shared mode no
-    acepta rates arbitrarios).
-  - El procesamiento se hace en el event-loop (async), no en la hebra de
-    captura, para no bloquear PortAudio.
-  - Cada bloque procesado lleva una cabecera de 4 bytes (uint32 LE) con el
-    timestamp_ms del instante de captura, para que el cliente calcule jitter.
+    acepta rates arbitrarios). Solo se soporta 48 kHz (o el nativo).
+  - Procesamiento en el event-loop (async), no en la hebra de captura,
+    para no bloquear PortAudio.
+  - Cada bloque lleva cabecera de 8 bytes (uint32 LE ts_ms + uint32 flags).
+  - Solo codec PCM Int16 LE. Sin mu-law, sin downsample (no necesario en LAN).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import struct
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import pyaudiowpatch as pyaudio
@@ -34,13 +32,11 @@ FORMAT = pyaudio.paInt16
 SAMPLE_WIDTH_BYTES = 2
 FRAMES_PER_BLOCK = 2048
 
-# Bits de tipo de codec en la cabecera de bloque.
+# Codec unico.
 CODEC_PCM = 0
-CODEC_MULAW = 1
 
-# Cabecera de bloque: 4 bytes timestamp + 1 byte flags (codec << 4) = 5 bytes
-# (mantenemos espacio para flags futuros). El magic del handshake va aparte.
-BLOCK_HEADER_BYTES = 8  # uint32 ts_ms + uint32 flags (reservado)
+# Cabecera de bloque: uint32 ts_ms + uint32 flags (reservado).
+BLOCK_HEADER_BYTES = 8
 
 
 @dataclass
@@ -54,74 +50,11 @@ class AudioFormat:
 
     @property
     def bytes_per_block(self) -> int:
-        if self.codec == CODEC_MULAW:
-            return self.frames_per_block * self.channels  # 1 byte/sample
         return self.frames_per_block * self.channels * self.sample_width
 
 
 class AudioCaptureError(RuntimeError):
     """Errores de captura WASAPI."""
-
-
-# ---------------------------------------------------------------------------
-# Procesador de bloques
-# ---------------------------------------------------------------------------
-
-# Tabla mu-law <- Int16 (estandar G.711). Precalculada al importar.
-def _build_mulaw_table() -> list[int]:
-    """Construye la tabla de codificacion mu-law (G.711). 65536 entradas."""
-    table = [0] * 65536
-    BIAS = 0x84
-    CLIP = 32635
-    for i in range(-32768, 32768):
-        sample = i
-        sign = 0x80 if sample < 0 else 0x00
-        sample = abs(sample)
-        if sample > CLIP:
-            sample = CLIP
-        sample += BIAS
-        exponent = 7
-        for mask in (0x4000, 0x2000, 0x1000, 0x0800, 0x0400, 0x0200, 0x0100):
-            if sample & mask:
-                break
-            exponent -= 1
-        mantissa = (sample >> (exponent + 3)) & 0x0F
-        mulaw_byte = int(sign) | (exponent << 4) | mantissa
-        # Invierte bits (mu-law usa bit flip)
-        mulaw_byte = ~mulaw_byte & 0xFF
-        # workptr: index into python list - key by unsigned int16
-        idx = i & 0xFFFF
-        table[idx] = mulaw_byte
-    return table
-
-
-# Construccion perezosa (modulo singleton).
-_MULAW_TABLE: Optional[list[int]] = None
-
-
-def _mulaw_table() -> list[int]:
-    global _MULAW_TABLE
-    if _MULAW_TABLE is None:
-        _MULAW_TABLE = _build_mulaw_table()
-    return _MULAW_TABLE
-
-
-def _mulaw_encode(int16_samples: bytes) -> bytes:
-    """Codifica bytes Int16 LE a bytes mu-law."""
-    table = _mulaw_table()
-    n = len(int16_samples) // 2
-    out = bytearray(n)
-    # Trabajo con vista unsigned para indexar la tabla.
-    for i in range(n):
-        lo = int16_samples[i * 2]
-        hi = int16_samples[i * 2 + 1]
-        # Combinar como signed (little-endian)
-        signed = (hi << 8) | lo
-        if signed >= 32768:
-            signed -= 65536
-        idx = signed & 0xFFFF
-        out[i] = table[idx]
-    return bytes(out)
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +66,7 @@ class ProcessedBlock:
     """Bloque listo para enviar a clientes de un formato dado."""
     seq: int
     ts_ms: int                      # timestamp de captura (ms monotonicos)
-    payload: bytes                  # bytes PCM/mulaw sin cabecera
+    payload: bytes                  # bytes PCM Int16 LE sin cabecera
     is_silence: bool = False
     rms: float = 0.0                # 0..1 (promedio RMS del bloque)
 
@@ -152,7 +85,7 @@ class WasapiLoopbackCapture:
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop,
-        raw_queue: "asyncio.Queue[tuple[int, bytes]]",
+        raw_queue: "asyncio.Queue[tuple[int, int, bytes]]",
     ) -> None:
         self.loop = loop
         self.raw_queue = raw_queue
@@ -250,20 +183,20 @@ class WasapiLoopbackCapture:
             except Exception:
                 pass
             self._stream = None
-
-    def is_running(self) -> bool:
-        """True si la hebra de captura está viva y no marcada para parar."""
-        return (
-            self._thread is not None
-            and self._thread.is_alive()
-            and not self._stop.is_set()
-        )
         if self._pa is not None:
             try:
                 self._pa.terminate()
             except Exception:
                 pass
             self._pa = None
+
+    def is_running(self) -> bool:
+        """True si la hebra de captura esta viva y no marcada para parar."""
+        return (
+            self._thread is not None
+            and self._thread.is_alive()
+            and not self._stop.is_set()
+        )
 
     # --- capture loop ------------------------------------------------------
 
@@ -322,9 +255,10 @@ class BlockProcessor:
     """Transforma bloques PCM crudos al formato de un cliente.
 
     Entrada: (seq, ts_ms, pcm_int16_le) en rate nativo stereo (o mono).
-    Salida: ProcessedBlock con payload en el formato negociado.
+    Salida: ProcessedBlock con payload PCM Int16 LE en el formato negociado.
 
-    Aplica: mono mix, downsample, mu-law, skip silencio, calculo RMS.
+    Aplica: mono mix, skip silencio, calculo RMS. Sin downsample, sin codec
+    alternativo (LAN asume 48 kHz nativo + PCM).
     """
 
     def __init__(self, fmt: AudioFormat, device_rate: int, device_channels: int,
@@ -338,7 +272,6 @@ class BlockProcessor:
         self.silence_threshold = silence_threshold
         self.silence_min_ms = silence_min_ms
         self._silence_since: Optional[float] = None
-        self._last_sent_seq: int = 0
 
     def process(self, seq: int, ts_ms: int, pcm: bytes) -> Optional[ProcessedBlock]:
         """Procesa un bloque crudo. Devuelve None si se descarta por silencio."""
@@ -369,19 +302,7 @@ class BlockProcessor:
         else:
             self._silence_since = None
 
-        # 3. Downsample rate (despues de mono para bajar carga).
-        if self.fmt.sample_rate != self.device_rate:
-            decoded = self._downsample(decoded, self.device_rate,
-                                       self.fmt.sample_rate,
-                                       channels)
-
-        # 4. Codec.
-        if self.fmt.codec == CODEC_MULAW:
-            payload = _mulaw_encode(decoded)
-        else:
-            payload = decoded
-
-        return ProcessedBlock(seq=seq, ts_ms=ts_ms, payload=payload,
+        return ProcessedBlock(seq=seq, ts_ms=ts_ms, payload=decoded,
                               is_silence=False, rms=rms)
 
     def _mix_to_mono(self, pcm: bytes, channels: int) -> bytes:
@@ -399,7 +320,6 @@ class BlockProcessor:
                     s -= 65536
                 acc += s
             m = acc // channels
-            # Clamp
             if m < -32768:
                 m = -32768
             elif m > 32767:
@@ -409,37 +329,11 @@ class BlockProcessor:
             out[f * 2 + 1] = (um >> 8) & 0xFF
         return bytes(out)
 
-    def _downsample(self, pcm: bytes, src_rate: int, dst_rate: int,
-                    channels: int) -> bytes:
-        """Downsample por decimacion con acumulador fraccional (nearest)."""
-        if src_rate == dst_rate or src_rate <= 0:
-            return pcm
-        ratio = src_rate / dst_rate
-        n_src_frames = (len(pcm) // 2) // channels
-        if n_src_frames == 0:
-            return pcm
-        n_dst_frames = max(1, int(n_src_frames / ratio))
-        out = bytearray(n_dst_frames * channels * 2)
-        out_idx = 0
-        acc = 0.0
-        for _ in range(n_dst_frames):
-            src_idx = int(acc)
-            if src_idx >= n_src_frames:
-                src_idx = n_src_frames - 1
-            base = src_idx * channels * 2
-            for c in range(channels):
-                out[out_idx] = pcm[base + c * 2]
-                out[out_idx + 1] = pcm[base + c * 2 + 1]
-                out_idx += 2
-            acc += ratio
-        return bytes(out)
-
     def _compute_rms(self, pcm: bytes, channels: int) -> float:
         n = len(pcm) // 2
         if n == 0:
             return 0.0
         sum_sq = 0
-        # Samplear cada N muestras para abarato ( RMS aprox).
         stride = max(1, n // 512)
         count = 0
         for i in range(0, n, stride):

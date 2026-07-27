@@ -36,8 +36,3 @@ class CaptureError(AudioBridgeError):
         super().__init__(message, status_code=503)
 
 
-class ClientGoneError(AudioBridgeError):
-    """Cliente desconectado inesperadamente."""
-
-    def __init__(self, client_id: int) -> None:
-        super().__init__(f"Client {client_id} gone", status_code=410)
