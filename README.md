@@ -1,86 +1,48 @@
-# PyAudioBridge
+# PyWebRTCSink
 
-Puente WASAPI Loopback → WebSocket → Web Audio API. Transmite audio del sistema Windows en tiempo real al navegador movil via TCP.
+Audio sobre IP en LAN: captura lo que suena en tu PC (WASAPI loopback)
+y lo envía por WebRTC al navegador de tu móvil, sin apps ni cables.
 
-```
-PC (WASAPI) ──► Python captura ──► WebSocket ──► Android Chrome ──► Web Audio API
-```
+## Qué hace
 
-## Uso
+- Captura el audio del dispositivo de salida por defecto de Windows.
+- Lo codifica en Opus y lo transmite via WebRTC (SRTP/UDP).
+- Lo reproduce en el móvil como sesión de media real (Foreground Service
+  en Android Chrome — no se congela con pantalla apagada).
+- Señalización stateless vía HTTP POST /offer.
 
-```powershell
-python src\server.py
-```
+## Tecnologías
 
-El servidor muestra:
+- [aiortc](https://github.com/aiortc/aiortc) — WebRTC para Python.
+- [PyAV](https://github.com/PyAV-Org/PyAV) — resampleado + codec Opus.
+- [PyAudioWPatch](https://github.com/s0DakkatingfenlyStakkater/PyAudioWPatch) — WASAPI loopback.
+- [aiohttp](https://github.com/aio-libs/aiohttp) — HTTP server + signalling.
 
-```
-IP local: 192.168.X.X
-Abre desde el movil: http://192.168.X.X:8080
-WebSocket:           ws://192.168.X.X:8080/ws
-```
+## Características
 
-Abre `http://192.168.X.X:8080` en el navegador Android. Presiona el boton central **INICIAR** para activar AudioContext (politica autoplay) y comenzar a escuchar.
+- **WASAPI loopback** — Captura el audio que escuchas por altavoces/auriculares,
+  no requiere micrófono virtual. Sample rate nativo, resampleo a 48k automático
+  si el dispositivo no está en 48k.
+- **Opus 48 kHz stereo ~128 kbps con FEC** — Recupera paquetes perdidos sin
+  cortes audibles en LAN/wifi inestable.
+- **WebRTC SRTP/UDP** — Resistente a Doze Mode: UDP no requiere keepalive TCP
+  y Android prioriza sesiones de audio reales.
+- **MediaSession API + Audio Focus recovery** — El navegador registra la
+  sesión como media real → Android la respeta con pantalla apagada. Si el SO
+  pausa el audio (ej: llamada entrante), se reanuda solo.
+- **Reconexión automática** — Backoff exponencial si ICE entra en estado
+  `failed`; watchdog detecta silencio RTP y fuerza re-negociación.
+- **Señalización stateless** — `POST /offer` no guarda sesiones; aiortc
+  mantiene estado de cada peer en memoria.
 
-## Firewall de Windows
+## Instalación
 
-Para permitir conexiones desde la LAN:
-
-**Opcion A — PowerShell (Admin):**
-```powershell
-New-NetFirewallRule -DisplayName "PyAudioBridge 8080" -Direction Inbound `
-  -Protocol TCP -LocalPort 8080 -Action Allow -Profile Private,Domain
-```
-
-> **Seguridad:** La regla permite solo desde redes Privada/Dominio (no Publica).
-
-## Audio
-
-### Dispositivo por defecto
-PyAudioBridge captura el dispositivo WASAPI loopback por defecto (el mismo que escuchas en los altavoces/auriculares).
-
-### Formato de audio
-- PCM Int16, sample rate nativo del dispositivo (tipico 48 kHz), estereo/mono segun dispositivo
-- El cliente recibe el formato real via cabecera WebSocket (4 primeros bytes: magic `PYAB`, luego rate, canales, sample_width en uint32 LE)
-
-## Arquitectura
-
-```
-src/
-  audio_capture.py   — Hebra dedicada PyAudioWPatch loopback → asyncio.Queue
-  server.py          — aiohttp HTTP (static/) + WebSocket + broadcast pump
-  utils.py           — resolucion IP local, helpers
-static/
-  index.html         — UI responsive movil
-  app.js             — WebSocket + jitter buffer + Web Audio API
+```bash
+git clone <repo>
+cd PyWebRTCSink
+pip install -r requirements.txt
+python src/server.py
 ```
 
-### Backpressure
-- Captura descarta bloques si cola asyncio llena
-- Broadcast descarga clientes lentos si acumulan >256 KiB backlog
-- Client sender descarta bloques viejos si cola llena
-
-### Jitter Buffer (cliente)
-- Agenda bloques via `AudioBufferSourceNode.start()` sobre `currentTime`
-- Gap minimo 20 ms anti-underrun
-- Si latencia supera 500 ms, realinea al objetivo de 120 ms
-
-## Verificacion
-
-```powershell
-python -m py_compile src\__init__.py src\utils.py src\audio_capture.py src\server.py
-```
-
-## Solucion de problemas
-
-| Problema | Causa | Solucion |
-|----------|-------|----------|
-| `OSError: Invalid sample rate` | El dispositivo no soporta 44.1 kHz | Se auto-adapta al rate nativo |
-| `LookupError: No loopback device` | Sin dispositivo WASAPI loopback | `python -m pyaudiowpatch` para listar |
-| No se conecta desde el movil | Firewall bloquea puerto | Agregar regla Firewall (ver arriba) |
-| Audio cortado / clicks | Buffer bajo o WiFi lento | El jitter buffer realinea automaticamente |
-| `WebSocket desconectado` | WiFi inestable | Reconexion automatica exponencial |
-
-## Licencia
-
-MIT
+Al iniciar muestra la URL del servidor (ej: `http://192.168.x.x:8080`).
+Abrela en el móvil (misma red WiFi), toca el botón ESCUCHAR.
