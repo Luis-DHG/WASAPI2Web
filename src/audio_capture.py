@@ -2,7 +2,7 @@
 
 Hebra dedicada lee bloques PCM Int16 LE del loopback del dispositivo de
 salida por defecto (lo que escuchas por altavoces/auriculares) y los
-publica en una asyncio.Queue para consumo del CustomAudioTrack de aiortc.
+publica en un CaptureBus (fan-out a N CustomAudioTrack de aiortc).
 
 Diseno:
   - Captura siempre el rate nativo del dispositivo (WASAPI shared mode).
@@ -16,8 +16,12 @@ import asyncio
 import logging
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import pyaudiowpatch as pyaudio
+
+if TYPE_CHECKING:
+    from .capture_bus import CaptureBus
 
 log = logging.getLogger("pywertcsink.audio")
 
@@ -33,16 +37,16 @@ class AudioCaptureError(RuntimeError):
 class WasapiLoopbackCapture:
     """Captura WASAPI loopback en hebra propia.
 
-    Publica bloques PCM (bytes Int16 LE) en raw_queue para el AudioTrack.
+    Publica bloques PCM (bytes Int16 LE) en un CaptureBus para los AudioTracks.
     """
 
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop,
-        raw_queue: "asyncio.Queue[bytes]",
+        bus: CaptureBus,
     ) -> None:
         self.loop = loop
-        self.raw_queue = raw_queue
+        self.bus = bus
         self._pa: pyaudio.PyAudio | None = None
         self._stream = None
         self._thread: threading.Thread | None = None
@@ -132,17 +136,6 @@ class WasapiLoopbackCapture:
                 break
 
             try:
-                self.loop.call_soon_threadsafe(self._enqueue, data)
+                self.loop.call_soon_threadsafe(self.bus.publish, data)
             except RuntimeError:
                 break
-
-    def _enqueue(self, item: bytes) -> None:
-        if self.raw_queue.full():
-            try:
-                self.raw_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-        try:
-            self.raw_queue.put_nowait(item)
-        except asyncio.QueueFull:
-            pass

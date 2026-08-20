@@ -3,10 +3,10 @@
 Arquitectura:
   * aiohttp.web sirve archivos estaticos y el index.
   * POST /offer recibe SDP Offer del cliente (JSON {sdp, type}),
-    crea RTCPeerConnection, anade CustomAudioTrack, genera SDP Answer
-    y lo devuelve como JSON. Stateless: no guarda sesiones en DB/cookie.
+    crea RTCPeerConnection, suscribe una cola al CaptureBus, anade CustomAudioTrack,
+    genera SDP Answer y lo devuelve como JSON. Stateless: no guarda sesiones en DB/cookie.
   * La captura WASAPI corre en hebra propia y publica bloques PCM en
-    una asyncio.Queue compartida por todos los CustomAudioTrack activos.
+    un CaptureBus con fan-out a cada CustomAudioTrack activo.
   * RTCPeerConnection se limpia sola cuando connectionState -> failed/closed.
 
 Run:
@@ -27,11 +27,13 @@ from aiohttp import web
 try:
     from .audio_capture import WasapiLoopbackCapture
     from .audio_track import CustomAudioTrack
+    from .capture_bus import CaptureBus
     from .utils import get_local_ip
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from src.audio_capture import WasapiLoopbackCapture  # type: ignore
     from src.audio_track import CustomAudioTrack  # type: ignore
+    from src.capture_bus import CaptureBus  # type: ignore
     from src.utils import get_local_ip  # type: ignore
 
 from aiortc import RTCPeerConnection, RTCSessionDescription
@@ -51,10 +53,9 @@ class WebRTCServer:
         self.port = port
         self.app = web.Application()
         self.capture: WasapiLoopbackCapture | None = None
-        self.capture_queue: "asyncio.Queue[bytes]" = \
-            asyncio.Queue(maxsize=CAPTURE_QUEUE_MAX)
-        # Conjunto de RTCPeerConnection activas para cleanup.
-        self._pcs: set = set()
+        self.bus = CaptureBus(maxsize=CAPTURE_QUEUE_MAX)
+        # ponytail: mapa pc -> peer_queue para permitir unsubscribe limpio e idempotente.
+        self._peer_queues: dict[RTCPeerConnection, asyncio.Queue[bytes]] = {}
 
         self.app.router.add_get("/", self.index_handler)
         self.app.router.add_post("/offer", self.offer_handler)
@@ -68,7 +69,7 @@ class WebRTCServer:
     async def _on_startup(self, app: web.Application) -> None:
         loop = asyncio.get_running_loop()
         self.capture = WasapiLoopbackCapture(
-            loop=loop, raw_queue=self.capture_queue
+            loop=loop, bus=self.bus
         )
         self.capture.start()
         log.info(
@@ -79,13 +80,15 @@ class WebRTCServer:
         )
 
     async def _on_cleanup(self, app: web.Application) -> None:
-        # Cerrar todas las RTCPeerConnection activas.
+        # Cerrar todas las RTCPeerConnection activas y desuscribir del bus.
         coros = []
-        for pc in list(self._pcs):
+        for pc, q in list(self._peer_queues.items()):
             coros.append(pc.close())
+            self.bus.unsubscribe(q)
+        self._peer_queues.clear()
         if coros:
             await asyncio.gather(*coros, return_exceptions=True)
-        self._pcs.clear()
+        self.bus.close()
         if self.capture:
             self.capture.stop()
 
@@ -112,8 +115,14 @@ class WebRTCServer:
         offer = RTCSessionDescription(sdp=sdp, type=typ)
 
         pc = RTCPeerConnection()
-        self._pcs.add(pc)
+        peer_q = self.bus.subscribe()
+        self._peer_queues[pc] = peer_q
         pc._cleanup_handle = None  # ponytail: timer para purge huérfanos
+
+        def _cleanup_peer(p: RTCPeerConnection) -> None:
+            q = self._peer_queues.pop(p, None)
+            if q is not None:
+                self.bus.unsubscribe(q)
 
         @pc.on("connectionstatechange")
         async def on_state_change() -> None:
@@ -125,7 +134,7 @@ class WebRTCServer:
 
             if state in ("failed", "closed"):
                 await pc.close()
-                self._pcs.discard(pc)
+                _cleanup_peer(pc)
             elif state == "disconnected":
                 # ponytail: ICE drop. Si no recupera en PC_DISCONNECT_TIMEOUT,
                 # cerramos para no retener referencias/eventos phantom.
@@ -136,11 +145,11 @@ class WebRTCServer:
         async def _purge(p: RTCPeerConnection) -> None:
             if p.connectionState in ("disconnected", "failed"):
                 await p.close()
-                self._pcs.discard(p)
+                _cleanup_peer(p)
 
         # Anadir nuestro CustomAudioTrack (audio capturado del PC).
         track = CustomAudioTrack(
-            raw_queue=self.capture_queue,
+            raw_queue=peer_q,
             device_rate=self.capture.device_rate,
             device_channels=self.capture.device_channels,
         )
@@ -153,7 +162,7 @@ class WebRTCServer:
         except Exception as exc:
             log.exception("Error en senalizacion WebRTC: %s", exc)
             await pc.close()
-            self._pcs.discard(pc)
+            _cleanup_peer(pc)
             return web.json_response(
                 {"error": f"Fallo senalizacion: {exc}"},
                 status=500,
