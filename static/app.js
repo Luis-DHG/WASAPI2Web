@@ -1,18 +1,19 @@
 /* app.js - PyWebRTCSink cliente WebRTC.
  *
  * Arquitectura:
- *   1. RTCPeerConnection ofrece SDP via fetch POST /offer al backend.
- *   2. <audio autoplay>.srcObject = event.streams[0] → decode Opus HW.
+ *   1. RTCPeerConnection ofrece SDP via Signalling.postOffer al backend.
+ *   2. <audio autoplay>.srcObject = event.streams[0] -> decode Opus HW.
  *   3. navigator.mediaSession registra Foreground Service de media en
  *      Android Chrome para prevenir Doze Mode al apagar pantalla.
  *   4. Listener "pause" en <audio> recupera Audio Focus si el SO pausa.
  *   5. Reconexion automatica si ICE entra en "failed".
+ *   6. RtpSilenceWatchdog (./watchdog.js) fuerza reconnect ante silencio RTP.
  *
  * Sin jitter buffer manual: el stack WebRTC del navegador gestiona
  * jitter, NACK, PLI y reordenado de paquetes.
  */
-(function () {
-  "use strict";
+import { postOffer, postMediaKey } from "./signalling.js";
+import { createRtpSilenceWatchdog } from "./watchdog.js";
 
   // ---- DOM ----
   const $ = (id) => document.getElementById(id);
@@ -34,16 +35,18 @@
   let reconnectTimer = null;
   let reconnectAttempts = 0;
   let wakeLock = null;
-  let watchdogTimer = null;
-  let lastPacketTs = 0;            // ultimo timestamp con paquetes RTP recibidos
-  let lastPacketsReceived = -1;     // contador anterior para delta
 
   // ---- Constantes ----
   const RECONNECT_BASE_MS = 500;
   const RECONNECT_MAX_MS = 5000;
   const ICE_SERVERS = [];  // vacio = solo host candidates (LAN pura)
-  const WATCHDOG_INTERVAL_MS = 3000;   // poll cada 3s
-  const WATCHDOG_SILENCE_MS = 10000;   // 10s sin paquetes → reconnect
+
+  // ---- Watchdog ----
+  function onSilenceDetected() {
+    watchdog.stop();
+    scheduleReconnect();
+  }
+  const watchdog = createRtpSilenceWatchdog({ onSilence: onSilenceDetected });
 
   // ---- Utilidades ----
   function log() {
@@ -81,6 +84,7 @@
   }
 
   // ---- MediaSession API — clave anti-Doze en Android ----
+  // ponytail: browser-specific, no extraer a spec compartida con Android (API difiere).
   function setupMediaSession() {
     if (!("mediaSession" in navigator)) return;
     try {
@@ -141,7 +145,7 @@
       if (event.track.kind === "audio") {
         audioEl.srcObject = event.streams[0];
         event.track.onunmute = function () {
-          lastPacketTs = Date.now();
+          watchdog.prime();
         };
         audioEl.play().catch(function (e) {
           log("Audio play fallo:", e.name);
@@ -160,10 +164,10 @@
         setBadge("Conectado", "live");
         log("Conectado al servidor");
         reconnectAttempts = 0;
-        startWatchdog();
+        watchdog.start(() => pc.getStats(), () => !!(pc && playing));
       }
       if (pc.connectionState === "failed" || pc.connectionState === "closed") {
-        stopWatchdog();
+        watchdog.stop();
       }
     };
 
@@ -174,32 +178,16 @@
     await waitForIceGathering(pc, 2000);
 
     setBadge("señalizando...", "recon");
-    let resp;
+    let answer;
     try {
-      resp = await fetch("/offer", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sdp: pc.localDescription.sdp,
-          type: pc.localDescription.type,
-        }),
-      });
+      answer = await postOffer(pc.localDescription);
     } catch (e) {
-      log("Fetch /offer fallo:", e);
-      setBadge("sin server", "off");
+      log("Signalling fallo:", e.message);
+      setBadge(/HTTP/.test(e.message) ? "error server" : "sin server", "off");
       scheduleReconnect();
       return;
     }
 
-    if (!resp.ok) {
-      const err = await resp.text();
-      log("/offer HTTP error", resp.status, err);
-      setBadge("error server", "off");
-      scheduleReconnect();
-      return;
-    }
-
-    const answer = await resp.json();
     await pc.setRemoteDescription(answer);
     setBadge("conectando...", "recon");
   }
@@ -219,43 +207,10 @@
     });
   }
 
-  // ---- Watchdog: detecta silencio RTP post-Doze y fuerza reconnect ----
-  async function startWatchdog() {
-    stopWatchdog();
-    lastPacketsReceived = -1;
-    watchdogTimer = setInterval(async function () {
-      if (!pc || !playing) return;
-      let packetsNow = -1;
-      try {
-        const stats = await pc.getStats();
-        stats.forEach(function (report) {
-          if (report.type === "inbound-rtp" && report.kind === "audio") {
-            packetsNow = report.packetsReceived || 0;
-          }
-        });
-      } catch (e) { return; }
-      if (packetsNow >= 0) {
-        if (packetsNow > lastPacketsReceived && lastPacketsReceived >= 0) {
-          // Paquetes nuevos: stream vivo.
-          lastPacketTs = Date.now();
-        }
-        lastPacketsReceived = packetsNow;
-      }
-      // Si llevamos >WATCHDOG_SILENCE_MS sin paquetes nuevos → reconnect.
-      if (lastPacketTs > 0 && Date.now() - lastPacketTs > WATCHDOG_SILENCE_MS) {
-        stopWatchdog();
-        scheduleReconnect();
-      }
-    }, WATCHDOG_INTERVAL_MS);
-  }
-  function stopWatchdog() {
-    if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
-  }
-
   // ---- Reconexion ----
   function scheduleReconnect() {
     if (reconnectTimer) return;
-    stopWatchdog();
+    watchdog.stop();
     if (pc) { try { pc.close(); } catch (e) {} pc = null; }
     const delay = Math.min(
       RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts),
@@ -304,7 +259,7 @@
 
     if (playing) {
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-      stopWatchdog();
+      watchdog.stop();
       if (pc) { try { pc.close(); } catch (e) {} pc = null; }
       releaseWakeLock();
       clearMediaSession();
@@ -356,9 +311,9 @@
     mediaKeyBtn.setAttribute("aria-busy", "true");
     mediaKeyBtn.classList.add("pulse-amber");
     try {
-      await fetch("/api/pc/media-key", { method: "POST" });
+      await postMediaKey();
     } catch (e) {
-      log("Fallo al enviar tecla multimedia:", e);
+      log("Fallo al enviar tecla multimedia:", e.message);
     } finally {
       setTimeout(() => {
         mediaKeyBtn.classList.remove("pulse-amber");
@@ -384,4 +339,3 @@
     toggleMute,
     sendMediaKey,
   };
-})();
