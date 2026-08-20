@@ -34,6 +34,14 @@ y lo envía por WebRTC al navegador de tu móvil, sin apps ni cables.
   `failed`; watchdog detecta silencio RTP y fuerza re-negociación.
 - **Señalización stateless** — `POST /offer` no guarda sesiones; aiortc
   mantiene estado de cada peer en memoria.
+- **Silencio y Control Remoto** —
+  - **Mute local (Móvil)**: Silencia el stream sin alterar el volumen general del teléfono ni perder el Audio Focus en Android.
+  - **Control multimedia de Windows**: Emula la tecla Play/Pause en Windows usando `ctypes` (sin librerías adicionales) para pausar Spotify/YouTube desde el móvil.
+
+## Endpoints API
+
+- `POST /offer` — Señalización WebRTC (SDP offer/answer).
+- `POST /api/pc/media-key` — Emula la tecla multimedia Play/Pause en Windows.
 
 ## Instalación
 

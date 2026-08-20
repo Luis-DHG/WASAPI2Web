@@ -22,10 +22,15 @@
   const hintCtx = $("hintCtx");
   const wsBadge = $("wsBadge");
   const audioEl = $("outEl");
+  const muteBtn = $("muteBtn");
+  const muteIcon = $("muteIcon");
+  const muteLabel = $("muteLabel");
+  const mediaKeyBtn = $("mediaKeyBtn");
 
   // ---- Estado ----
   let pc = null;
   let playing = false;
+  let isMuted = false;
   let reconnectTimer = null;
   let reconnectAttempts = 0;
   let wakeLock = null;
@@ -46,9 +51,19 @@
     args.unshift("[PyWebRTCSink]");
     console.log.apply(console, args);
   }
+  function setControlsEnabled(enabled) {
+    [muteBtn, mediaKeyBtn].forEach(function (b) {
+      if (b) b.disabled = !enabled;
+    });
+  }
   function setBadge(text, cls) {
     wsBadge.textContent = text;
     wsBadge.className = "badge " + (cls || "");
+    if (cls === "off") {
+      setControlsEnabled(false);
+    } else if (cls === "live") {
+      setControlsEnabled(true);
+    }
   }
   function setPlaying(isPlaying) {
     playing = isPlaying;
@@ -75,20 +90,14 @@
         album: "WebRTC Stream",
       });
       navigator.mediaSession.setActionHandler("play", function () {
-        log("MediaSession: play handler");
-        audioEl.play().catch(function (e) { log("play handler err:", e); });
+        audioEl.play().catch(function (e) { log("Error en play:", e); });
         if (navigator.mediaSession) navigator.mediaSession.playbackState = "playing";
       });
-      navigator.mediaSession.setActionHandler("pause", function () {
-        log("MediaSession: pause handler");
-      });
-      navigator.mediaSession.setActionHandler("stop", function () {
-        log("MediaSession: stop handler");
-      });
+      navigator.mediaSession.setActionHandler("pause", function () {});
+      navigator.mediaSession.setActionHandler("stop", function () {});
       navigator.mediaSession.playbackState = "playing";
-      log("MediaSession configurada. playbackState=playing");
     } catch (e) {
-      log("MediaSession setup fallo:", e);
+      log("MediaSession fallo:", e);
     }
   }
   function clearMediaSession() {
@@ -108,9 +117,7 @@
     if (wakeLock) return;
     try {
       wakeLock = await navigator.wakeLock.request("screen");
-      log("WakeLock (screen) activo");
       wakeLock.addEventListener("release", function () {
-        log("WakeLock revocado por SO");
         wakeLock = null;
         if (playing) requestWakeLock();
       });
@@ -131,36 +138,27 @@
 
     // Recepcion de track remoto
     pc.ontrack = function (event) {
-      log("Track remoto recibido:", event.track.kind);
       if (event.track.kind === "audio") {
         audioEl.srcObject = event.streams[0];
-        // Marcar timestamp primer unmute (stream vivo).
         event.track.onunmute = function () {
           lastPacketTs = Date.now();
-          log("Track unmute — stream vivo");
         };
-        // Intentar playback inmediatamente (autoplay puede requerir gesto).
-        audioEl.play().then(function () {
-          log("<audio> play OK");
-        }).catch(function (e) {
-          log("<audio> play fallo (esperando gesto):", e.name);
+        audioEl.play().catch(function (e) {
+          log("Audio play fallo:", e.name);
         });
       }
     };
 
-    // Estado ICE para diagnostico
     pc.oniceconnectionstatechange = function () {
-      log("ICE state:", pc.iceConnectionState);
       if (pc.iceConnectionState === "failed") {
-        log("ICE failed → reconectar");
         scheduleReconnect();
       }
     };
     pc.onconnectionstatechange = function () {
-      log("PC state:", pc.connectionState);
       if (pc.connectionState === "failed") scheduleReconnect();
       if (pc.connectionState === "connected") {
         setBadge("Conectado", "live");
+        log("Conectado al servidor");
         reconnectAttempts = 0;
         startWatchdog();
       }
@@ -169,20 +167,12 @@
       }
     };
 
-    // Solo receive-only: addTransceiver audio recvonly para que el
-    // server sepa que queremos su track.
     pc.addTransceiver("audio", { direction: "recvonly" });
 
-    // Crear offer
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    log("SDP Offer creado. Esperando ICE gather...");
-
-    // Esperar a que ICE gathering termine (host candidates en LAN
-    // deberian ser instantaneos).
     await waitForIceGathering(pc, 2000);
 
-    // Enviar offer al backend
     setBadge("señalizando...", "recon");
     let resp;
     try {
@@ -195,7 +185,7 @@
         }),
       });
     } catch (e) {
-      log("fetch /offer fallo:", e);
+      log("Fetch /offer fallo:", e);
       setBadge("sin server", "off");
       scheduleReconnect();
       return;
@@ -203,16 +193,14 @@
 
     if (!resp.ok) {
       const err = await resp.text();
-      log("/offer HTTP", resp.status, err);
+      log("/offer HTTP error", resp.status, err);
       setBadge("error server", "off");
       scheduleReconnect();
       return;
     }
 
     const answer = await resp.json();
-    log("SDP Answer recibido");
     await pc.setRemoteDescription(answer);
-    log("SDP Answer aplicado. Esperando ICE connectivity...");
     setBadge("conectando...", "recon");
   }
 
@@ -220,7 +208,6 @@
     return new Promise(function (resolve) {
       if (pc.iceGatheringState === "complete") { resolve(); return; }
       var t = setTimeout(function () {
-        log("ICE gather timeout, continuando con partial candidates");
         resolve();
       }, timeoutMs);
       pc.addEventListener("icegatheringstatechange", function () {
@@ -256,13 +243,10 @@
       }
       // Si llevamos >WATCHDOG_SILENCE_MS sin paquetes nuevos → reconnect.
       if (lastPacketTs > 0 && Date.now() - lastPacketTs > WATCHDOG_SILENCE_MS) {
-        log("Watchdog: sin paquetes RTP en", WATCHDOG_SILENCE_MS, "ms → reconnect");
         stopWatchdog();
         scheduleReconnect();
       }
     }, WATCHDOG_INTERVAL_MS);
-    log("Watchdog iniciado (interval=" + WATCHDOG_INTERVAL_MS +
-        "ms, silence=" + WATCHDOG_SILENCE_MS + "ms)");
   }
   function stopWatchdog() {
     if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
@@ -279,7 +263,6 @@
     );
     reconnectAttempts++;
     setBadge("recon en " + Math.round(delay) + "ms", "recon");
-    log("Reconnect en", delay, "ms (intento " + reconnectAttempts + ")");
     reconnectTimer = setTimeout(function () {
       reconnectTimer = null;
       if (playing) negotiate();
@@ -288,37 +271,25 @@
 
   // ---- Audio Focus recovery: Android puede pausar el <audio> ----
   audioEl.addEventListener("pause", function () {
-    // Si estabamos playing y el SO pauso (no el usuario), reanudar.
     if (playing && audioEl.paused) {
-      log("<audio> pause evento → intentar reanudar");
       audioEl.play().catch(function (e) {
-        log("reanudacion post-pause fallo:", e.name);
+        log("Reanudacion post-pause fallo:", e.name);
       });
     }
   });
-  audioEl.addEventListener("ended", function () {
-    log("<audio> ended evento");
-  });
+  audioEl.addEventListener("ended", function () {});
 
   // ---- Lifecycle ----
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden && playing) {
-      log("visibilitychange → visible");
       requestWakeLock();
-      if (audioEl.paused) {
-        audioEl.play().catch(function () {});
-      }
-      if (navigator.mediaSession) {
-        navigator.mediaSession.playbackState = "playing";
-      }
+      if (audioEl.paused) audioEl.play().catch(function () {});
+      if (navigator.mediaSession) navigator.mediaSession.playbackState = "playing";
     }
   });
   if ("onfreeze" in document) {
-    document.addEventListener("freeze", function () {
-      log("Lifecycle freeze");
-    });
+    document.addEventListener("freeze", function () {});
     document.addEventListener("resume", function () {
-      log("Lifecycle resume");
       if (playing) {
         requestWakeLock();
         if (audioEl.paused) audioEl.play().catch(function () {});
@@ -332,7 +303,6 @@
     try { navigator.vibrate(10); } catch (e) {}
 
     if (playing) {
-      // STOP
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       stopWatchdog();
       if (pc) { try { pc.close(); } catch (e) {} pc = null; }
@@ -341,24 +311,68 @@
       if (audioEl) { try { audioEl.pause(); } catch (e) {} audioEl.srcObject = null; }
       setPlaying(false);
       setBadge("Desconectado", "off");
-      log("Reproduccion detenida.");
       return;
     }
 
-    // START
-    log("Boton INICIAR presionado.");
     setPlaying(true);
     setBadge("conectando...", "recon");
     try {
       await negotiate();
       setupMediaSession();
       requestWakeLock();
-      log("Reproduccion iniciada.");
     } catch (e) {
       log("togglePlay fallo:", e);
       setBadge("error", "off");
     }
   }
+
+  // ---- Controles: Silenciar Móvil y Media Key PC ----
+  function updateMuteUi(muted) {
+    isMuted = muted;
+    audioEl.muted = isMuted;
+    if (!muteBtn) return;
+    muteBtn.setAttribute("aria-pressed", String(isMuted));
+    muteBtn.setAttribute("aria-label", isMuted ? "Activar audio móvil" : "Silenciar audio móvil");
+    if (isMuted) {
+      muteBtn.classList.add("active-warn");
+      muteLabel.textContent = "Silenciado";
+      muteIcon.innerHTML = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>';
+    } else {
+      muteBtn.classList.remove("active-warn");
+      muteLabel.textContent = "Silenciar";
+      muteIcon.innerHTML = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>';
+    }
+  }
+
+  function toggleMute() {
+    try { navigator.vibrate(10); } catch (e) {}
+    updateMuteUi(!isMuted);
+  }
+
+  async function sendMediaKey() {
+    if (!mediaKeyBtn || mediaKeyBtn.disabled) return;
+    try { navigator.vibrate([10, 30, 10]); } catch (e) {}
+    mediaKeyBtn.disabled = true;
+    mediaKeyBtn.setAttribute("aria-busy", "true");
+    mediaKeyBtn.classList.add("pulse-amber");
+    try {
+      await fetch("/api/pc/media-key", { method: "POST" });
+    } catch (e) {
+      log("Fallo al enviar tecla multimedia:", e);
+    } finally {
+      setTimeout(() => {
+        mediaKeyBtn.classList.remove("pulse-amber");
+        mediaKeyBtn.disabled = false;
+        mediaKeyBtn.setAttribute("aria-busy", "false");
+      }, 220);
+    }
+  }
+
+  if (muteBtn) muteBtn.addEventListener("click", toggleMute);
+  if (mediaKeyBtn) mediaKeyBtn.addEventListener("click", sendMediaKey);
+
+  // Estado inicial de controles (deshabilitados hasta conexion)
+  setControlsEnabled(false);
 
   playBtn.addEventListener("click", togglePlay);
 
@@ -366,6 +380,8 @@
   window.PyWebRTCSink = {
     get pc() { return pc; },
     get playing() { return playing; },
+    get isMuted() { return isMuted; },
+    toggleMute,
+    sendMediaKey,
   };
-  log("PyWebRTCSink cliente listo (WebRTC + MediaSession).");
 })();

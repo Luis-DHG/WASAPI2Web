@@ -118,8 +118,6 @@ class WasapiLoopbackCapture:
             self._pa = None
 
     def _run(self) -> None:
-        blocks = 0
-        t0 = time.monotonic()
         while not self._stop.is_set():
             try:
                 data = self._stream.read(
@@ -137,14 +135,6 @@ class WasapiLoopbackCapture:
                 self.loop.call_soon_threadsafe(self._enqueue, data)
             except RuntimeError:
                 break
-
-            blocks += 1
-            if blocks % 1000 == 0:
-                elapsed = time.monotonic() - t0
-                log.debug(
-                    "captura: %d bloques, %.1f bloques/s",
-                    blocks, blocks / elapsed,
-                )
 
     def _enqueue(self, item: bytes) -> None:
         if self.raw_queue.full():

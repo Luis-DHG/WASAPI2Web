@@ -58,6 +58,7 @@ class WebRTCServer:
 
         self.app.router.add_get("/", self.index_handler)
         self.app.router.add_post("/offer", self.offer_handler)
+        self.app.router.add_post("/api/pc/media-key", self.media_key_handler)
         self.app.router.add_static("/static", STATIC_DIR, name="static")
         self.app.on_startup.append(self._on_startup)
         self.app.on_cleanup.append(self._on_cleanup)
@@ -125,20 +126,17 @@ class WebRTCServer:
             if state in ("failed", "closed"):
                 await pc.close()
                 self._pcs.discard(pc)
-                log.info("PC %s — purgado", state)
             elif state == "disconnected":
                 # ponytail: ICE drop. Si no recupera en PC_DISCONNECT_TIMEOUT,
                 # cerramos para no retener referencias/eventos phantom.
                 pc._cleanup_handle = asyncio.get_event_loop().call_later(
                     PC_DISCONNECT_TIMEOUT, lambda: asyncio.ensure_future(_purge(pc))
                 )
-                log.debug("PC disconnected — timer purge %ds", PC_DISCONNECT_TIMEOUT)
 
         async def _purge(p: RTCPeerConnection) -> None:
             if p.connectionState in ("disconnected", "failed"):
                 await p.close()
                 self._pcs.discard(p)
-                log.info("PC huérfano purgado tras timeout")
 
         # Anadir nuestro CustomAudioTrack (audio capturado del PC).
         track = CustomAudioTrack(
@@ -167,6 +165,19 @@ class WebRTCServer:
         return web.json_response(
             {"sdp": local.sdp, "type": local.type}
         )
+
+    async def media_key_handler(self, request: web.Request) -> web.Response:
+        """POST /api/pc/media-key — emula tecla Play/Pause en Windows con ctypes."""
+        try:
+            import ctypes
+            VK_MEDIA_PLAY_PAUSE = 0xB3
+            KEYEVENTF_KEYUP = 0x0002
+            ctypes.windll.user32.keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(VK_MEDIA_PLAY_PAUSE, 0, KEYEVENTF_KEYUP, 0)
+            return web.json_response({"status": "ok", "action": "play_pause"})
+        except Exception as exc:
+            log.warning("Fallo al enviar tecla multimedia: %s", exc)
+            return web.json_response({"error": str(exc)}, status=500)
 
     # --- run ---------------------------------------------------------------
 

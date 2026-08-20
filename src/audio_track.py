@@ -59,7 +59,6 @@ class CustomAudioTrack(MediaStreamTrack):
                 layout=TARGET_LAYOUT,
                 rate=TARGET_RATE,
             )
-            log.debug("Resampler: %d -> %d Hz", device_rate, TARGET_RATE)
 
     async def recv(self) -> av.AudioFrame:
         """Devuelve el siguiente AudioFrame a 48kHz para aiortc."""
