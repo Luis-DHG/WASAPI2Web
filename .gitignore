@@ -4,4 +4,3 @@ src/__pycache__/
 .DS_Store
 /android
 context.md
-/tests
