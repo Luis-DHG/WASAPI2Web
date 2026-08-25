@@ -45,5 +45,5 @@ export function createRtpSilenceWatchdog({ intervalMs = 3000, silenceMs = 10000,
     if (timer) { clearInterval(timer); timer = null; }
   }
 
-  return { start, stop, prime, observe };
+  return { start, stop, prime };
 }

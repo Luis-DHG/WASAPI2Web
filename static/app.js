@@ -232,7 +232,6 @@ import { createRtpSilenceWatchdog } from "./watchdog.js";
       });
     }
   });
-  audioEl.addEventListener("ended", function () {});
 
   // ---- Lifecycle ----
   document.addEventListener("visibilitychange", function () {
@@ -243,7 +242,6 @@ import { createRtpSilenceWatchdog } from "./watchdog.js";
     }
   });
   if ("onfreeze" in document) {
-    document.addEventListener("freeze", function () {});
     document.addEventListener("resume", function () {
       if (playing) {
         requestWakeLock();

@@ -29,11 +29,6 @@ class CaptureBus:
         self._maxsize = maxsize
         self._subs: Set[asyncio.Queue[bytes]] = set()
 
-    @property
-    def subscriber_count(self) -> int:
-        """Número de suscriptores activos."""
-        return len(self._subs)
-
     def subscribe(self) -> asyncio.Queue[bytes]:
         """Crea y registra una nueva cola de suscriptor."""
         q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=self._maxsize)
@@ -66,7 +61,3 @@ class CaptureBus:
                 q.put_nowait(payload)
             except (asyncio.QueueFull, ValueError) as exc:
                 log.debug("No se pudo encolar bloque en suscriptor: %s", exc)
-
-    def close(self) -> None:
-        """Limpia todos los suscriptores registrados."""
-        self._subs.clear()

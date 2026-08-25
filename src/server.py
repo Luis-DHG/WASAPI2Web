@@ -88,7 +88,6 @@ class WebRTCServer:
         self._peer_queues.clear()
         if coros:
             await asyncio.gather(*coros, return_exceptions=True)
-        self.bus.close()
         if self.capture:
             self.capture.stop()
 
