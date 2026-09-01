@@ -1,48 +1,56 @@
 """Utilidades de red y helpers para PyWebRTCSink."""
 
+import ipaddress
 import socket
 
 
 def get_local_ip(default: str = "127.0.0.1") -> str:
     """Resuelve la IP local (LAN) del host.
 
-    Junta candidatos de dos fuentes (truco del socket UDP hacia una IP
-    publica + getaddrinfo del hostname) y elige la de red privada LAN,
-    prefiriendo 192.168.x.x sobre adaptadores virtuales (172.16.x de
-    WSL/Hyper-V/VPN suelen ganar la ruta por defecto).
-    """
-    candidates: list[str] = []
+    Alcance: solo LAN privada (RFC1918). Nunca devuelve una IP publica —
+    el producto es LAN-only, si el host no tiene IP privada se devuelve
+    `default` y se considera un error de configuracion del usuario.
 
-    sock = None
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.connect(("203.0.113.1", 80))
-        candidates.append(sock.getsockname()[0])
-    except OSError:
-        pass
-    finally:
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
+    Candidatos: (1) IP origen de la ruta por defecto (omito adaptadores
+    virtuales) por lo que se prefiere cualquier 192.168.x.x."""
+    
+    routed: str | None = None
+    host_candidates: list[str] = []
 
     try:
-        host = socket.gethostname()
-        for info in socket.getaddrinfo(host, None):
+        for info in socket.getaddrinfo(socket.gethostname(), None):
             ip = info[4][0]
-            if ":" not in ip and not ip.startswith("127."):
-                candidates.append(ip)
+            if ":" not in ip and ip not in host_candidates:
+                host_candidates.append(ip)
     except OSError:
         pass
 
-    # ponytail: orden fijo por subred; si tu LAN usa otro rango, agregarlo arriba.
-    for prefix in ("192.168.", "10."):
-        for ip in candidates:
-            if ip.startswith(prefix):
-                return ip
-    for ip in candidates:
-        if not ip.startswith("169.254"):
+    def usable(ip: str) -> ipaddress.IPv4Address | None:
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return None
+        if addr.is_loopback or addr.is_link_local or addr.is_multicast:
+            return None
+        return addr
+
+    all_ips = ([routed] if routed else []) + host_candidates
+    private = [ip for ip in all_ips
+               if (a := usable(ip)) is not None and a.is_private]
+
+    # ponytail: 192.168.x.x primero = LAN domestica real. Evita que un
+    # adaptador virtual que gano la ruta por defecto opaque la LAN.
+    for ip in private:
+        if ip.startswith("192.168."):
             return ip
+    if private:
+        return private[0]
     return default
+
+
+if __name__ == "__main__":
+    # Smoke check: debe devolver IPv4 privada o el default 127.0.0.1.
+    ip = get_local_ip()
+    addr = ipaddress.ip_address(ip)
+    assert addr.version == 4 and (addr.is_private or addr.is_loopback)
+    print(ip)

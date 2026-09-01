@@ -54,3 +54,4 @@ python src/server.py
 
 Al iniciar muestra la URL del servidor (ej: `http://192.168.x.x:8080`).
 Abrela en el móvil (misma red WiFi), toca el botón ESCUCHAR.
+El servidor se anuncia por mDNS (`_pywrtc._tcp.local`): la app Android lo auto-descubre si hay uno solo en la LAN.

@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import sys
 
 from aiohttp import web
@@ -38,6 +39,14 @@ except ImportError:
 
 from aiortc import RTCPeerConnection, RTCSessionDescription
 
+try:
+    from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
+except ImportError:
+    # ponytail: mDNS opcional; sin zeroconf el server sirve igual, solo
+    # no se auto-anuncia en la LAN.
+    AsyncServiceInfo = None  # type: ignore
+    AsyncZeroconf = None  # type: ignore
+
 log = logging.getLogger("pywertcsink.server")
 
 HTTP_PORT = 8080
@@ -56,6 +65,10 @@ class WebRTCServer:
         self.bus = CaptureBus(maxsize=CAPTURE_QUEUE_MAX)
         # ponytail: mapa pc -> peer_queue para permitir unsubscribe limpio e idempotente.
         self._peer_queues: dict[RTCPeerConnection, asyncio.Queue[bytes]] = {}
+        # ponytail: anotaciones perezosas via `from __future__ import annotations`;
+        # si zeroconf no esta instalado estos nombres son None, sin NameError.
+        self._zc: AsyncZeroconf | None = None
+        self._zc_info: AsyncServiceInfo | None = None
 
         self.app.router.add_get("/", self.index_handler)
         self.app.router.add_post("/offer", self.offer_handler)
@@ -72,12 +85,23 @@ class WebRTCServer:
             loop=loop, bus=self.bus
         )
         self.capture.start()
+        ip = get_local_ip()
         log.info(
             "Listo — http://%s:%d — %s (%dHz %dch)",
-            get_local_ip(), self.port,
+            ip, self.port,
             self.capture.device_name,
             self.capture.device_rate, self.capture.device_channels,
         )
+        if AsyncZeroconf is not None:
+            self._zc = AsyncZeroconf()
+            self._zc_info = AsyncServiceInfo(
+                "_pywrtc._tcp.local.",
+                "PyWebRTCSink._pywrtc._tcp.local.",
+                addresses=[socket.inet_aton(ip)],
+                port=self.port,
+                server=f"{socket.gethostname()}.local.",
+            )
+            await self._zc.async_register_service(self._zc_info)
 
     async def _on_cleanup(self, app: web.Application) -> None:
         # Cerrar todas las RTCPeerConnection activas y desuscribir del bus.
@@ -90,6 +114,10 @@ class WebRTCServer:
             await asyncio.gather(*coros, return_exceptions=True)
         if self.capture:
             self.capture.stop()
+        if self._zc is not None:
+            if self._zc_info is not None:
+                await self._zc.async_unregister_service(self._zc_info)
+            await self._zc.async_close()
 
     # --- handlers HTTP -----------------------------------------------------
 
