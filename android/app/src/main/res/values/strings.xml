@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">PyWebRTCSink</string>
+    <string name="notification_channel_name">PyWebRTCSink Audio</string>
+    <string name="notification_channel_desc">Streaming de audio WASAPI en tiempo real</string>
+    <string name="notification_title">PyWebRTCSink</string>
+    <string name="notification_text">Escuchando audio del PC (WASAPI Loopback)</string>
+</resources>

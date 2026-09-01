@@ -2,7 +2,6 @@
 
 Audio sobre IP en LAN: captura lo que suena en tu PC (WASAPI loopback)
 y lo envía por WebRTC al navegador de tu móvil, sin apps ni cables.
-
 ## Qué hace
 
 - Captura el audio del dispositivo de salida por defecto de Windows.

@@ -1,0 +1,13 @@
+# Android
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+
+# binarios / claves locales
+*.apk
+*.aab
+*.keystore
+*.jks
+captures/
