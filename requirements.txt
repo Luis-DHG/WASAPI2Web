@@ -1,4 +1,0 @@
-aiortc>=1.9.0
-av>=14.0.0
-PyAudioWPatch>=0.2.12.8
-aiohttp>=3.9.0

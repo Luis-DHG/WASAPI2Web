@@ -1,0 +1,10 @@
+^C:\USERS\USER\DESKTOP\WASAPI\PYWEBRTCSINK_CORE\TARGET\RELEASE\BUILD\AUDIOPUS_SYS-898D85C323B6F9D9\OUT\BUILD\CMAKEFILES\07BF695B52A64518CC6C926350D5BB02\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/USER/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/audiopus_sys-0.2.2/opus -BC:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/release/build/audiopus_sys-898d85c323b6f9d9/out/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/release/build/audiopus_sys-898d85c323b6f9d9/out/build/Opus.slnx
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

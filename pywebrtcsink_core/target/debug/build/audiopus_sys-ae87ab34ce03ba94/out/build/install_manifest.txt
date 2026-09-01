@@ -1,0 +1,11 @@
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/debug/build/audiopus_sys-ae87ab34ce03ba94/out/lib/opus.lib
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/debug/build/audiopus_sys-ae87ab34ce03ba94/out/include/opus/opus.h
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/debug/build/audiopus_sys-ae87ab34ce03ba94/out/include/opus/opus_defines.h
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/debug/build/audiopus_sys-ae87ab34ce03ba94/out/include/opus/opus_multistream.h
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/debug/build/audiopus_sys-ae87ab34ce03ba94/out/include/opus/opus_projection.h
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/debug/build/audiopus_sys-ae87ab34ce03ba94/out/include/opus/opus_types.h
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/debug/build/audiopus_sys-ae87ab34ce03ba94/out/lib/pkgconfig/opus.pc
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/debug/build/audiopus_sys-ae87ab34ce03ba94/out/lib/cmake/Opus/OpusTargets.cmake
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/debug/build/audiopus_sys-ae87ab34ce03ba94/out/lib/cmake/Opus/OpusTargets-debug.cmake
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/debug/build/audiopus_sys-ae87ab34ce03ba94/out/lib/cmake/Opus/OpusConfig.cmake
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/debug/build/audiopus_sys-ae87ab34ce03ba94/out/lib/cmake/Opus/OpusConfigVersion.cmake

@@ -10,19 +10,22 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.net.wifi.WifiManager
 import android.os.Build
-import androidx.core.content.ContextCompat
 import android.os.IBinder
 import android.os.PowerManager
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.wasapi.sink.MainActivity
 import com.wasapi.sink.R
+import com.wasapi.sink.audio.engine.EngineState
+import com.wasapi.sink.audio.engine.RealtimeAudioSinkEngine
 import com.wasapi.sink.webrtc.SignallingClient
-import com.wasapi.sink.webrtc.WebRtcManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -34,7 +37,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import org.webrtc.PeerConnection
 import kotlin.math.min
 import kotlin.math.pow
 
@@ -50,65 +52,57 @@ data class ServiceUiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
     val isPlaying: Boolean = false,
     val isMuted: Boolean = false,
-    val serverUrl: String = ""
+    val serverUrl: String = "",
+    val underrunCount: Int = 0,
+    val droppedFrames: Long = 0L
 )
 
 class AudioForegroundService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var wakeLock: PowerManager.WakeLock? = null
-    // ponytail: el PARTIAL_WAKE_LOCK mantiene la CPU pero no la radio Wi-Fi;
-    // sin WifiLock los paquetes RTP entrantes se pierden con pantalla apagada.
     private var wifiLock: WifiManager.WifiLock? = null
     private var audioManager: AudioManager? = null
+    private var focusRequest: AudioFocusRequest? = null
 
-    // ponytail: C (alternativas.md) — al encender pantalla, replicar el kick
-    // que el desbloqueo hace a mano sobre track/ruta de audio.
-    private val screenReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == Intent.ACTION_SCREEN_ON) {
-                webRtcManager?.kickAudio()
-            }
-        }
-    }
-
-    // ponytail: D (alternativas.md) — foco real; hoy el sistema puede mutearnos
-    // por robo de foco sin que nos enteremos.
-    private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
-        if (change == AudioManager.AUDIOFOCUS_GAIN) {
-            webRtcManager?.kickAudio()
-        }
-    }
     private var mediaSession: MediaSessionCompat? = null
-    private var webRtcManager: WebRtcManager? = null
+    private var audioSinkEngine: RealtimeAudioSinkEngine? = null
     private val signallingClient = SignallingClient()
 
     private var reconnectJob: Job? = null
     private var reconnectAttempts = 0
     private var currentServerUrl: String = ""
 
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_SCREEN_ON) {
+                // Reafirmar volumen y estado
+                audioSinkEngine?.setMuted(_uiState.value.isMuted)
+            }
+        }
+    }
+
+    private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
+        if (change == AudioManager.AUDIOFOCUS_GAIN) {
+            audioSinkEngine?.setMuted(_uiState.value.isMuted)
+        } else if (change == AudioManager.AUDIOFOCUS_LOSS) {
+            stopStreaming()
+            stopSelf()
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         setupMediaSession()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
         ContextCompat.registerReceiver(
-            this, screenReceiver, IntentFilter(Intent.ACTION_SCREEN_ON),
+            this,
+            screenReceiver,
+            IntentFilter(Intent.ACTION_SCREEN_ON),
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
-        webRtcManager = WebRtcManager(this, signallingClient).apply {
-            onConnectionStateChange = { state ->
-                handleConnectionStateChange(state)
-            }
-            onIceConnectionStateChange = { state ->
-                if (state == PeerConnection.IceConnectionState.FAILED) {
-                    scheduleReconnect()
-                }
-            }
-            onSilenceDetected = {
-                scheduleReconnect()
-            }
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -128,7 +122,7 @@ class AudioForegroundService : Service() {
             ACTION_TOGGLE_MUTE -> {
                 val newMuted = !_uiState.value.isMuted
                 _uiState.value = _uiState.value.copy(isMuted = newMuted)
-                webRtcManager?.setMuted(newMuted)
+                audioSinkEngine?.setMuted(newMuted)
             }
             ACTION_SEND_MEDIA_KEY -> {
                 serviceScope.launch {
@@ -141,11 +135,8 @@ class AudioForegroundService : Service() {
 
     private fun startForegroundStreaming(serverUrl: String) {
         acquireWakeLock()
-        // ponytail: AUDIOFOCUS_GAIN — foco de media real; sin esto otra app
-        // puede mutearnos en background y nunca recuperarlo.
-        audioManager?.requestAudioFocus(
-            focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN
-        )
+        requestAudioFocus()
+
         val notif = buildNotification("Conectando con $serverUrl...")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
@@ -160,48 +151,58 @@ class AudioForegroundService : Service() {
             connectionState = ConnectionState.CONNECTING
         )
 
-        connectWebRtc(serverUrl)
+        connectEngine(serverUrl)
     }
 
-    private fun connectWebRtc(serverUrl: String) {
+    private fun connectEngine(serverUrl: String) {
         reconnectJob?.cancel()
-        serviceScope.launch {
-            webRtcManager?.connect(serverUrl, this)
-                ?.onSuccess {
-                    reconnectAttempts = 0
-                }
-                ?.onFailure {
-                    _uiState.value =
-                        _uiState.value.copy(connectionState = ConnectionState.ERROR)
-                    scheduleReconnect()
-                }
+        audioSinkEngine?.stop()
+
+        val engine = RealtimeAudioSinkEngine(this, serverUrl).apply {
+            onStateChange = { engineState ->
+                handleEngineStateChange(engineState)
+            }
+            onMetricsUpdate = { underruns, dropped ->
+                _uiState.value = _uiState.value.copy(
+                    underrunCount = underruns,
+                    droppedFrames = dropped
+                )
+            }
         }
+
+        audioSinkEngine = engine
+        engine.setMuted(_uiState.value.isMuted)
+        engine.start()
     }
 
-    private fun handleConnectionStateChange(state: PeerConnection.PeerConnectionState) {
+    private fun handleEngineStateChange(engineState: EngineState) {
         serviceScope.launch {
-            when (state) {
-                PeerConnection.PeerConnectionState.CONNECTED -> {
+            val connState = when (engineState) {
+                EngineState.CONNECTED -> {
                     reconnectAttempts = 0
-                    _uiState.value = _uiState.value.copy(
-                        connectionState = ConnectionState.CONNECTED
-                    )
                     updateNotification("Conectado: $currentServerUrl")
+                    ConnectionState.CONNECTED
                 }
-                PeerConnection.PeerConnectionState.FAILED -> {
-                    _uiState.value = _uiState.value.copy(connectionState = ConnectionState.RECONNECTING)
+                EngineState.CONNECTING -> ConnectionState.CONNECTING
+                EngineState.RECONNECTING -> {
                     scheduleReconnect()
+                    ConnectionState.RECONNECTING
                 }
-                PeerConnection.PeerConnectionState.DISCONNECTED -> {
-                    _uiState.value = _uiState.value.copy(connectionState = ConnectionState.RECONNECTING)
+                EngineState.ERROR -> {
+                    scheduleReconnect()
+                    ConnectionState.ERROR
                 }
-                PeerConnection.PeerConnectionState.CLOSED -> {
+                EngineState.DISCONNECTED -> {
                     if (_uiState.value.isPlaying) {
-                        _uiState.value = _uiState.value.copy(connectionState = ConnectionState.DISCONNECTED)
+                        scheduleReconnect()
+                        ConnectionState.RECONNECTING
+                    } else {
+                        ConnectionState.DISCONNECTED
                     }
                 }
-                else -> {}
             }
+
+            _uiState.value = _uiState.value.copy(connectionState = connState)
         }
     }
 
@@ -209,7 +210,6 @@ class AudioForegroundService : Service() {
         if (!_uiState.value.isPlaying) return
         if (reconnectJob?.isActive == true) return
 
-        webRtcManager?.closePeerConnection()
         val delayMs = min(
             (500.0 * 2.0.pow(reconnectAttempts.toDouble())).toLong(),
             5000L
@@ -222,8 +222,43 @@ class AudioForegroundService : Service() {
         reconnectJob = serviceScope.launch {
             delay(delayMs)
             if (isActive && _uiState.value.isPlaying) {
-                connectWebRtc(currentServerUrl)
+                connectEngine(currentServerUrl)
             }
+        }
+    }
+
+    private fun requestAudioFocus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val playbackAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+
+            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(playbackAttributes)
+                .setAcceptsDelayedFocusGain(false)
+                .setOnAudioFocusChangeListener(focusListener)
+                .build()
+
+            focusRequest = req
+            audioManager?.requestAudioFocus(req)
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager?.requestAudioFocus(
+                focusListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN
+            )
+        }
+    }
+
+    private fun abandonAudioFocus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            focusRequest?.let { audioManager?.abandonAudioFocusRequest(it) }
+            focusRequest = null
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager?.abandonAudioFocus(focusListener)
         }
     }
 
@@ -231,9 +266,10 @@ class AudioForegroundService : Service() {
         reconnectJob?.cancel()
         reconnectJob = null
         reconnectAttempts = 0
-        webRtcManager?.closePeerConnection()
+        audioSinkEngine?.stop()
+        audioSinkEngine = null
         releaseWakeLock()
-        audioManager?.abandonAudioFocus(focusListener)
+        abandonAudioFocus()
 
         _uiState.value = _uiState.value.copy(
             isPlaying = false,
@@ -270,7 +306,6 @@ class AudioForegroundService : Service() {
         }
 
         if (wifiLock == null) {
-            // LOW_LATENCY requiere API 29; HIGH_PERF cubre minSdk 24.
             val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
                 WifiManager.WIFI_MODE_FULL_LOW_LATENCY
             else
@@ -312,7 +347,7 @@ class AudioForegroundService : Service() {
                 setShowBadge(false)
             }
             val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            manager?.createNotificationChannel(channel)
         }
     }
 
@@ -352,8 +387,6 @@ class AudioForegroundService : Service() {
     override fun onDestroy() {
         runCatching { unregisterReceiver(screenReceiver) }
         stopStreaming()
-        webRtcManager?.dispose()
-        webRtcManager = null
         mediaSession?.release()
         mediaSession = null
         serviceScope.cancel()
@@ -408,6 +441,5 @@ class AudioForegroundService : Service() {
             }
             context.startService(intent)
         }
-
     }
 }

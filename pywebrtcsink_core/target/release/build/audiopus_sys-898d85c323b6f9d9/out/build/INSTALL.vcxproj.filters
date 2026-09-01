@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\USER\Desktop\Wasapi\pywebrtcsink_core\target\release\build\audiopus_sys-898d85c323b6f9d9\out\build\CMakeFiles\07bf695b52a64518cc6c926350d5bb02\INSTALL_force.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{8D0FB3EA-B2AB-3387-BA91-9360FD5AD3BD}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

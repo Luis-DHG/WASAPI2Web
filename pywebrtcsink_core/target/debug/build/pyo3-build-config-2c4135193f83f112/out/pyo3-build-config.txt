@@ -1,0 +1,10 @@
+implementation=CPython
+version=3.9
+shared=true
+abi3=true
+lib_name=python3
+lib_dir=C:\Users\USER\AppData\Local\Programs\Python\Python314\libs
+executable=C:\Users\USER\AppData\Local\Programs\Python\Python314\python.exe
+pointer_width=64
+build_flags=
+suppress_build_script_link_lines=false

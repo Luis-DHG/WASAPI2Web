@@ -1,0 +1,47 @@
+[package]
+name = "pywebrtcsink-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Core Audio Engineering Team"]
+description = "High-performance native WASAPI Loopback to Opus WebSocket streamer with proactive TCP backpressure management."
+
+[lib]
+name = "pywebrtcsink_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Python Native Extensions
+pyo3 = { version = "0.22.6", features = ["extension-module", "abi3-py39"] }
+
+# Windows Audio & MMCSS APIs
+windows = { version = "0.58.0", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_Media_Audio",
+    "Win32_Media_Multimedia",
+    "Win32_Security"
+] }
+
+# Opus Encoder
+audiopus = "0.3.0-rc.0"
+
+# Async Runtime & Networking
+tokio = { version = "1.39.0", features = ["full"] }
+tokio-tungstenite = "0.23.1"
+futures-util = { version = "0.3.30", default-features = false, features = ["sink", "std"] }
+anyhow = "1.0"
+
+# Lock-Free Audio RingBuffers
+rtrb = "0.3.1"
+
+# Logging & Telemetry
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,5 @@
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/release/build/audiopus_sys-898d85c323b6f9d9/out/build/CMakeFiles/opus.dir
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/release/build/audiopus_sys-898d85c323b6f9d9/out/build/CMakeFiles/PACKAGE.dir
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/release/build/audiopus_sys-898d85c323b6f9d9/out/build/CMakeFiles/INSTALL.dir
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/release/build/audiopus_sys-898d85c323b6f9d9/out/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/USER/Desktop/Wasapi/pywebrtcsink_core/target/release/build/audiopus_sys-898d85c323b6f9d9/out/build/CMakeFiles/ZERO_CHECK.dir
