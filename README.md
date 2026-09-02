@@ -1,55 +1,35 @@
 # Sink
 
 Audio sobre IP en LAN: captura lo que suena en tu PC (WASAPI loopback)
-y lo envía por WebRTC al navegador de tu móvil, sin apps ni cables.
+y lo envía como Opus por WebSocket a un cliente — navegador o app Android
+nativa — sin cables.
+
 ## Qué hace
 
-- Captura el audio del dispositivo de salida por defecto de Windows.
-- Lo codifica en Opus y lo transmite via WebRTC (SRTP/UDP).
-- Lo reproduce en el móvil como sesión de media real (Foreground Service
-  en Android Chrome — no se congela con pantalla apagada).
-- Señalización stateless vía HTTP POST /offer.
+- Captura el audio del dispositivo de salida por defecto de Windows
+  (loopback, sin micrófono virtual) en un núcleo nativo Rust.
+- Lo codifica en Opus 48 kHz stereo (~96 kbps, con FEC) y lo publica en
+  un WebSocket binario (`ws://<ip>:8090`).
+- Aun no funciona el cliente web estático, solo el aplicativo movil.
 
-## Tecnologías
+## Componentes
 
-- [aiortc](https://github.com/aiortc/aiortc) — WebRTC para Python.
-- [PyAV](https://github.com/PyAV-Org/PyAV) — resampleado + codec Opus.
-- [PyAudioWPatch](https://github.com/s0DakkatingfenlyStakkater/PyAudioWPatch) — WASAPI loopback.
-- [aiohttp](https://github.com/aio-libs/aiohttp) — HTTP server + signalling.
+- `pywebrtcsink_core/` — motor Rust (PyO3): WASAPI loopback → ring buffer
+  → encoder Opus → servidor WS con broadcast y backpressure drop-tail
+  (cola de 3 frames por cliente). Build: `maturin develop --release`.
+- `start.py` — arranque todo-en-uno (stdlib): motor + `http.server` con
+  `static/` y `POST /api/pc/media-key` (tecla Play/Pause vía ctypes).
+- `android/` — cliente nativo (Kotlin/Compose): WebSocket → Concentus
+  (decoder Opus) → `AudioTrack` low-latency. Foreground Service con
+  WakeLock + WifiLock `FULL_LOW_LATENCY` para pantalla apagada.
+- `static/` — cliente web (WS + WebCodecs).
 
-## Características
+## Protocolo WS
 
-- **WASAPI loopback** — Captura el audio que escuchas por altavoces/auriculares,
-  no requiere micrófono virtual. Sample rate nativo, resampleo a 48k automático
-  si el dispositivo no está en 48k.
-- **Opus 48 kHz stereo ~128 kbps con FEC** — Recupera paquetes perdidos sin
-  cortes audibles en LAN/wifi inestable.
-- **WebRTC SRTP/UDP** — Resistente a Doze Mode: UDP no requiere keepalive TCP
-  y Android prioriza sesiones de audio reales.
-- **MediaSession API + Audio Focus recovery** — El navegador registra la
-  sesión como media real → Android la respeta con pantalla apagada. Si el SO
-  pausa el audio (ej: llamada entrante), se reanuda solo.
-- **Reconexión automática** — Backoff exponencial si ICE entra en estado
-  `failed`; watchdog detecta silencio RTP y fuerza re-negociación.
-- **Señalización stateless** — `POST /offer` no guarda sesiones; aiortc
-  mantiene estado de cada peer en memoria.
-- **Silencio y Control Remoto** —
-  - **Mute local (Móvil)**: Silencia el stream sin alterar el volumen general del teléfono ni perder el Audio Focus en Android.
-  - **Control multimedia de Windows**: Emula la tecla Play/Pause en Windows usando `ctypes` (sin librerías adicionales) para pausar Spotify/YouTube desde el móvil.
+Un frame binario por paquete Opus: `[seq:u32BE][ts:u32BE][payload opus]`.
+Frames de 20 ms (960 muestras/canal @ 48 kHz). `ts` avanza de 960 en 960.
 
-## Endpoints API
+## Endpoints HTTP (:8080)
 
-- `POST /offer` — Señalización WebRTC (SDP offer/answer).
-- `POST /api/pc/media-key` — Emula la tecla multimedia Play/Pause en Windows.
-
-## Instalación
-
-```bash
-git clone <repo>
-cd PyWebRTCSink
-pip install -r requirements.txt
-python src/server.py
-```
-
-Al iniciar muestra la URL del servidor (ej: `http://192.168.x.x:8080`).
-Abrela en el móvil (misma red WiFi), toca el botón ESCUCHAR.
+- `GET /` — cliente web estático.
+- `POST /api/pc/media-key` — emula la tecla multimedia Play/Pause en Windows.

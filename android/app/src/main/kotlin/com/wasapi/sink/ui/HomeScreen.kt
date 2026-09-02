@@ -86,7 +86,6 @@ import kotlinx.coroutines.launch
 fun HomeScreen(
     uiState: ServiceUiState,
     initialServerUrl: String?,
-    discoveredServers: List<String> = emptyList(),
     onServerUrlChanged: (String) -> Unit,
     onRequestNotificationPermission: (() -> Unit)? = null
 ) {
@@ -96,11 +95,6 @@ fun HomeScreen(
 
     var serverUrlInput by remember(initialServerUrl) { mutableStateOf(initialServerUrl ?: "") }
     var mediaKeyPulsing by remember { mutableStateOf(false) }
-
-    // mDNS: exactamente 1 server en la LAN -> auto-pick, sin UI extra.
-    LaunchedEffect(discoveredServers.toList()) {
-        if (discoveredServers.size == 1) serverUrlInput = discoveredServers[0]
-    }
 
     // B3: debounce URL changes — solo dispara onServerUrlChanged despues de 400ms sin teclear
     LaunchedEffect(serverUrlInput) {
@@ -171,30 +165,6 @@ fun HomeScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 4.dp)
             )
-
-            // Varios servers mDNS en la LAN: chips para elegir.
-            if (discoveredServers.size > 1) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    discoveredServers.forEach { url ->
-                        val selected = url == serverUrlInput
-                        Text(
-                            text = url,
-                            fontSize = 12.sp,
-                            color = if (selected) BgDark else AccentCyan,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(999.dp))
-                                .background(if (selected) AccentCyan else CardBg)
-                                .border(1.dp, AccentCyan, RoundedCornerShape(999.dp))
-                                .clickable { serverUrlInput = url }
-                                .padding(horizontal = 10.dp, vertical = 4.dp)
-                        )
-                    }
-                }
-            }
 
             Spacer(modifier = Modifier.height(16.dp))
 
