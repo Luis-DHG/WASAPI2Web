@@ -10,7 +10,7 @@ nativa — sin cables.
   (loopback, sin micrófono virtual) en un núcleo nativo Rust.
 - Lo codifica en Opus 48 kHz stereo (~96 kbps, con FEC) y lo publica en
   un WebSocket binario (`ws://<ip>:8090`).
-- Aun no funciona el cliente web estático, solo el aplicativo movil.
+- Se escucha desde el navegador (`http://<ip>:8080`) o la app Android.
 
 ## Componentes
 
@@ -22,7 +22,22 @@ nativa — sin cables.
 - `android/` — cliente nativo (Kotlin/Compose): WebSocket → Concentus
   (decoder Opus) → `AudioTrack` low-latency. Foreground Service con
   WakeLock + WifiLock `FULL_LOW_LATENCY` para pantalla apagada.
-- `static/` — cliente web (WS + WebCodecs).
+- `static/` — cliente web (WS + decoder Opus WASM vendoreado,
+  funciona en Chrome/Edge/Firefox/Safari sin WebCodecs).
+
+## Probar el cliente web
+
+1. En el PC: `python start.py` (anota la IP que imprime, ej. `192.168.1.10`).
+2. En el móvil (misma WiFi): abrir `http://192.168.1.10:8080`.
+3. Tocar **ESCUCHAR**. Si hay error de audio, el hint bajo el botón
+   muestra el motivo (además de la consola del navegador).
+
+Notas:
+
+- El decoder es `opus-decoder` (WASM, MIT) vendoreado en
+  `static/vendor/opus-decoder.min.js` (v0.7.12, single-file, sin
+  toolchain). Para actualizarlo: `npm pack opus-decoder` y copiar
+  `package/dist/opus-decoder.min.js` a `static/vendor/`.
 
 ## Protocolo WS
 
