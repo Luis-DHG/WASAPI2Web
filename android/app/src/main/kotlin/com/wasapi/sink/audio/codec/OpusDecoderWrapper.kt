@@ -39,6 +39,7 @@ class OpusDecoderWrapper(
      * @param outputShorts Pre-allocated array to receive PCM 16-bit samples.
      * @param outputOffset Offset in outputShorts where decoded samples will be placed.
      * @param frameSize Muestras por canal (960 para 20ms @ 48kHz).
+     * @param decodeFEC Si true, decodifica el FEC inband del paquete (PLC del frame previo); si no, frame normal.
      * @return Number of samples per channel decoded, or negative on error.
      */
     fun decode(
@@ -47,7 +48,8 @@ class OpusDecoderWrapper(
         inputSize: Int,
         outputShorts: ShortArray,
         outputOffset: Int = 0,
-        frameSize: Int = 960
+        frameSize: Int = 960,
+        decodeFEC: Boolean = false
     ): Int {
         val dec = decoder ?: return -1
         return try {
@@ -63,7 +65,7 @@ class OpusDecoderWrapper(
                 outputShorts,
                 outputOffset,
                 frameSize,
-                false // decodeFEC = false
+                decodeFEC
             )
             decoded
         } catch (e: OpusException) {
@@ -83,7 +85,8 @@ class OpusDecoderWrapper(
         inputOffset: Int,
         inputSize: Int,
         outputByteBuffer: ByteBuffer,
-        frameSize: Int = 960
+        frameSize: Int = 960,
+        decodeFEC: Boolean = false
     ): Int {
         val samplesDecodedPerChannel = decode(
             input,
@@ -91,7 +94,8 @@ class OpusDecoderWrapper(
             inputSize,
             rawOutputArray,
             0,
-            frameSize
+            frameSize,
+            decodeFEC
         )
 
         if (samplesDecodedPerChannel > 0) {

@@ -25,7 +25,7 @@ import com.wasapi.sink.MainActivity
 import com.wasapi.sink.R
 import com.wasapi.sink.audio.engine.EngineState
 import com.wasapi.sink.audio.engine.RealtimeAudioSinkEngine
-import com.wasapi.sink.webrtc.SignallingClient
+import com.wasapi.sink.control.MediaKeyClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -67,11 +67,12 @@ class AudioForegroundService : Service() {
 
     private var mediaSession: MediaSessionCompat? = null
     private var audioSinkEngine: RealtimeAudioSinkEngine? = null
-    private val signallingClient = SignallingClient()
+    private val signallingClient = MediaKeyClient()
 
     private var reconnectJob: Job? = null
     private var reconnectAttempts = 0
     private var currentServerUrl: String = ""
+    private var lastStatusText: String = ""
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -88,6 +89,12 @@ class AudioForegroundService : Service() {
         } else if (change == AudioManager.AUDIOFOCUS_LOSS) {
             stopStreaming()
             stopSelf()
+        } else if (change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT ||
+            change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK
+        ) {
+            // ponytail: perdida transitoria (notificacion, asistente) solo duckeamos via mute;
+            // GAIN restaura desde _uiState. Solo LOSS permanente detiene el stream.
+            audioSinkEngine?.setMuted(true)
         }
     }
 
@@ -123,6 +130,7 @@ class AudioForegroundService : Service() {
                 val newMuted = !_uiState.value.isMuted
                 _uiState.value = _uiState.value.copy(isMuted = newMuted)
                 audioSinkEngine?.setMuted(newMuted)
+                updateNotification(lastStatusText)
             }
             ACTION_SEND_MEDIA_KEY -> {
                 serviceScope.launch {
@@ -156,7 +164,7 @@ class AudioForegroundService : Service() {
 
     private fun connectEngine(serverUrl: String) {
         reconnectJob?.cancel()
-        audioSinkEngine?.stop()
+        stopEngine()
 
         val engine = RealtimeAudioSinkEngine(this, serverUrl).apply {
             onStateChange = { engineState ->
@@ -266,8 +274,7 @@ class AudioForegroundService : Service() {
         reconnectJob?.cancel()
         reconnectJob = null
         reconnectAttempts = 0
-        audioSinkEngine?.stop()
-        audioSinkEngine = null
+        stopEngine()
         releaseWakeLock()
         abandonAudioFocus()
 
@@ -276,6 +283,17 @@ class AudioForegroundService : Service() {
             connectionState = ConnectionState.DISCONNECTED
         )
         stopForeground(STOP_FOREGROUND_REMOVE)
+    }
+
+    // ponytail: engine.stop() hace join+release (bloquea); fuera del Main o es jank/ANR.
+    private fun stopEngine() {
+        val engine = audioSinkEngine
+        audioSinkEngine = null
+        if (engine != null) {
+            serviceScope.launch(Dispatchers.IO) {
+                engine.stop()
+            }
+        }
     }
 
     private fun setupMediaSession() {
@@ -352,6 +370,7 @@ class AudioForegroundService : Service() {
     }
 
     private fun buildNotification(statusText: String): Notification {
+        lastStatusText = statusText
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
@@ -368,6 +387,15 @@ class AudioForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val muteIntent = Intent(this, AudioForegroundService::class.java).apply {
+            action = ACTION_TOGGLE_MUTE
+        }
+        val pendingMute = PendingIntent.getService(
+            this, 2, muteIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val muted = _uiState.value.isMuted
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(getString(R.string.notification_title))
@@ -375,6 +403,11 @@ class AudioForegroundService : Service() {
             .setContentIntent(pendingOpen)
             .setOngoing(true)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Detener", pendingStop)
+            .addAction(
+                android.R.drawable.ic_lock_silent_mode,
+                if (muted) "Activar sonido" else "Silenciar",
+                pendingMute
+            )
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }

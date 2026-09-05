@@ -28,10 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.VolumeMute
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
@@ -63,8 +60,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.wasapi.sink.service.AudioForegroundService
 import com.wasapi.sink.service.ConnectionState
+import com.wasapi.sink.service.AudioForegroundService
 import com.wasapi.sink.service.ServiceUiState
 import com.wasapi.sink.ui.theme.AccentCyan
 import com.wasapi.sink.ui.theme.AmberWarn
@@ -202,7 +199,7 @@ fun HomeScreen(
                         verticalArrangement = Arrangement.Center
                     ) {
                         Icon(
-                            imageVector = if (uiState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            imageVector = if (uiState.isPlaying) IconPause else Icons.Default.PlayArrow,
                             contentDescription = null,
                             tint = if (uiState.isPlaying) BgDark else AccentCyan,
                             modifier = Modifier.size(if (isLandscape) 42.dp else 56.dp)
@@ -222,7 +219,7 @@ fun HomeScreen(
 
                 Text(
                     text = when {
-                        uiState.isPlaying && isConnected -> "Escuchando audio del PC · WebRTC"
+                        uiState.isPlaying && isConnected -> "Escuchando audio del PC · WS/Opus"
                         uiState.isPlaying -> "Conectando al stream de audio..."
                         else -> "Toca para escuchar el audio del PC"
                     },
@@ -244,7 +241,7 @@ fun HomeScreen(
             ) {
                 ControlButton(
                     text = if (uiState.isMuted) "Silenciado" else "Silenciar",
-                    icon = if (uiState.isMuted) Icons.Default.VolumeMute else Icons.Default.VolumeUp,
+                    icon = if (uiState.isMuted) IconVolumeOff else IconVolumeUp,
                     isActive = uiState.isMuted,
                     activeBg = DangerRedBg,
                     activeBorder = DangerRed,

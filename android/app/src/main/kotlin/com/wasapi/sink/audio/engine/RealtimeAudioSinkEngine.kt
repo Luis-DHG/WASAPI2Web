@@ -63,7 +63,6 @@ class RealtimeAudioSinkEngine(
     data class AudioPacket(
         val buffer: ByteBuffer,
         var sequenceNumber: Long = 0L,
-        var timestamp: Long = 0L,
         var payloadSize: Int = 0
     )
 
@@ -228,13 +227,12 @@ class RealtimeAudioSinkEngine(
                 buf.flip()
 
                 // Cabecera binaria Big-Endian (u32BE seq + u32BE ts) — ver opus.rs (to_be_bytes)
+                // ponytail: ts no se consume (jitter es FIFO puro); solo seq.
                 buf.order(ByteOrder.BIG_ENDIAN)
                 val seq = buf.int.toLong() and 0xFFFFFFFFL
-                val ts = buf.int.toLong() and 0xFFFFFFFFL
                 val payloadSize = length - HEADER_SIZE_BYTES
 
                 packet.sequenceNumber = seq
-                packet.timestamp = ts
                 packet.payloadSize = payloadSize
 
                 // Insertar en la cola del Jitter Buffer
@@ -293,45 +291,19 @@ class RealtimeAudioSinkEngine(
                 // Esperar el siguiente paquete (máximo 25ms para evitar bloquear indefinidamente)
                 val packet = jitterQueue.poll(25, TimeUnit.MILLISECONDS) ?: continue
 
-                // Detección de pérdidas de paquetes
+                // Hueco de secuencia: el encoder emite FEC inband, asi que decodificar
+                // el paquete actual con FEC recupera el frame previo perdido (PLC real).
                 if (lastSequenceNumber != -1L && packet.sequenceNumber > lastSequenceNumber + 1) {
                     val lostCount = packet.sequenceNumber - (lastSequenceNumber + 1)
                     Log.w(TAG, "Pérdida detectada: $lostCount paquetes omitidos (Seq: ${packet.sequenceNumber})")
+                    renderPacket(packet, decodeFEC = true)
                 }
                 lastSequenceNumber = packet.sequenceNumber
 
-                pcmOutputBuffer.clear()
-
-                // Decodificación directa sin asignación de memoria
-                val decodedSamples = opusDecoder?.decodeToByteBuffer(
-                    input = packet.buffer,
-                    inputOffset = HEADER_SIZE_BYTES,
-                    inputSize = packet.payloadSize,
-                    outputByteBuffer = pcmOutputBuffer,
-                    frameSize = SAMPLES_PER_FRAME_PER_CHANNEL
-                ) ?: -1
+                renderPacket(packet, decodeFEC = false)
 
                 // Devolver el paquete al pool inmediatamente
                 packetPool.offer(packet)
-
-                if (decodedSamples > 0) {
-                    if (!isMuted) {
-                        // Renderizado en AudioTrack
-                        audioTrack?.let { track ->
-                            val bytesWritten = track.write(
-                                pcmOutputBuffer,
-                                pcmOutputBuffer.remaining(),
-                                AudioTrack.WRITE_BLOCKING
-                            )
-
-                            if (bytesWritten < 0) {
-                                Log.e(TAG, "Error de escritura en AudioTrack: $bytesWritten")
-                            }
-                        }
-                    }
-                } else {
-                    Log.e(TAG, "Error en decodificación Opus: código $decodedSamples")
-                }
 
                 // Reporte periódico de métricas (cada 5 segundos)
                 val now = System.currentTimeMillis()
@@ -353,6 +325,48 @@ class RealtimeAudioSinkEngine(
         Log.i(TAG, "Bucle de reproducción de audio finalizado.")
     }
 
+    /**
+     * Decodifica un paquete (con FEC si se pide PLC) y lo escribe al AudioTrack.
+     * Siempre decodifica aunque este muteado para no desincronizar el estado del decoder Opus.
+     */
+    private fun renderPacket(packet: AudioPacket, decodeFEC: Boolean) {
+        pcmOutputBuffer.clear()
+
+        // Decodificación directa sin asignación de memoria
+        val decodedSamples = opusDecoder?.decodeToByteBuffer(
+            input = packet.buffer,
+            inputOffset = HEADER_SIZE_BYTES,
+            inputSize = packet.payloadSize,
+            outputByteBuffer = pcmOutputBuffer,
+            frameSize = SAMPLES_PER_FRAME_PER_CHANNEL,
+            decodeFEC = decodeFEC
+        ) ?: -1
+
+        if (decodedSamples > 0) {
+            if (!isMuted) {
+                // Renderizado en AudioTrack
+                audioTrack?.let { track ->
+                    // ponytail: write parcial exige reintentar resto; dropearlo era underrun silencioso.
+                    while (pcmOutputBuffer.hasRemaining()) {
+                        val bytesWritten = track.write(
+                            pcmOutputBuffer,
+                            pcmOutputBuffer.remaining(),
+                            AudioTrack.WRITE_BLOCKING
+                        )
+
+                        if (bytesWritten < 0) {
+                            Log.e(TAG, "Error de escritura en AudioTrack: $bytesWritten")
+                            break
+                        }
+                        if (bytesWritten == 0) break // evita spin si HAL no avanza
+                    }
+                }
+            }
+        } else {
+            Log.e(TAG, "Error en decodificación Opus: código $decodedSamples")
+        }
+    }
+
     fun stop() {
         if (!isRunning.compareAndSet(true, false)) return
 
@@ -361,6 +375,10 @@ class RealtimeAudioSinkEngine(
 
         webSocket?.close(1000, "App closed")
         webSocket = null
+
+        // ponytail: cada engine trae su propio OkHttpClient; apagarlo o cada reconnect fuga hilos.
+        httpClient.dispatcher.executorService.shutdown()
+        httpClient.connectionPool.evictAll()
 
         audioThread?.interrupt()
         try {

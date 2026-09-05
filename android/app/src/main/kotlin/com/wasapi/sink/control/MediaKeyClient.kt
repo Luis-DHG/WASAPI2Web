@@ -1,4 +1,4 @@
-package com.wasapi.sink.webrtc
+package com.wasapi.sink.control
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -8,7 +8,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
-class SignallingClient(
+class MediaKeyClient(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
