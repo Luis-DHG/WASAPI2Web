@@ -51,10 +51,7 @@ enum class ConnectionState {
 data class ServiceUiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
     val isPlaying: Boolean = false,
-    val isMuted: Boolean = false,
-    val serverUrl: String = "",
-    val underrunCount: Int = 0,
-    val droppedFrames: Long = 0L
+    val isMuted: Boolean = false
 )
 
 class AudioForegroundService : Service() {
@@ -155,7 +152,6 @@ class AudioForegroundService : Service() {
         reconnectAttempts = 0
         _uiState.value = _uiState.value.copy(
             isPlaying = true,
-            serverUrl = serverUrl,
             connectionState = ConnectionState.CONNECTING
         )
 
@@ -169,12 +165,6 @@ class AudioForegroundService : Service() {
         val engine = RealtimeAudioSinkEngine(this, serverUrl).apply {
             onStateChange = { engineState ->
                 handleEngineStateChange(engineState)
-            }
-            onMetricsUpdate = { underruns, dropped ->
-                _uiState.value = _uiState.value.copy(
-                    underrunCount = underruns,
-                    droppedFrames = dropped
-                )
             }
         }
 

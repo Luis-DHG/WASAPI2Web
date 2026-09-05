@@ -67,7 +67,6 @@ class RealtimeAudioSinkEngine(
     )
 
     var onStateChange: ((EngineState) -> Unit)? = null
-    var onMetricsUpdate: ((underruns: Int, droppedFrames: Long) -> Unit)? = null
 
     private val isRunning = AtomicBoolean(false)
     private var isMuted = false
@@ -83,6 +82,9 @@ class RealtimeAudioSinkEngine(
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS) // Keep alive continuo
+        // ponytail: ping NAT/OS-keepalive — sin esto el SO puede congelar el
+        // socket en background y el badge queda "Conectado" con audio muerto.
+        .pingInterval(30, TimeUnit.SECONDS)
         .build()
 
     // Buffers de decodificación directos pre-asignados
@@ -91,7 +93,6 @@ class RealtimeAudioSinkEngine(
     // Métricas y seguimiento de secuencia
     private var lastSequenceNumber = -1L
     private var droppedFramesCount = 0L
-    private var lastMetricsReportTs = 0L
 
     init {
         // Inicializar el Pool de memoria nativa fija (Zero-GC Churn)
@@ -304,16 +305,6 @@ class RealtimeAudioSinkEngine(
 
                 // Devolver el paquete al pool inmediatamente
                 packetPool.offer(packet)
-
-                // Reporte periódico de métricas (cada 5 segundos)
-                val now = System.currentTimeMillis()
-                if (now - lastMetricsReportTs > 5000L) {
-                    lastMetricsReportTs = now
-                    val underruns = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        audioTrack?.underrunCount ?: 0
-                    } else 0
-                    onMetricsUpdate?.invoke(underruns, droppedFramesCount)
-                }
 
             } catch (e: InterruptedException) {
                 break

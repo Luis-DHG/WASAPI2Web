@@ -8,8 +8,8 @@ import java.nio.ByteBuffer
 private const val TAG = "OpusDecoderWrapper"
 
 /**
- * High-performance Opus Decoder wrapper for 48kHz stereo streams.
- * Engineered for zero GC allocations during real-time decoding.
+ * Wrapper zero-alloc del decoder Concentus: DirectByteBuffer → DirectByteBuffer
+ * para AudioTrack, con arrays reutilizados para no generar GC en runtime.
  */
 class OpusDecoderWrapper(
     val sampleRate: Int = 48000,
@@ -32,53 +32,14 @@ class OpusDecoderWrapper(
     }
 
     /**
-     * Decodes an Opus frame from a DirectByteBuffer into a ShortArray.
-     * @param input Buffer containing the Opus packet payload.
-     * @param inputOffset Starting offset within the input buffer.
-     * @param inputSize Length of the Opus compressed payload in bytes.
-     * @param outputShorts Pre-allocated array to receive PCM 16-bit samples.
-     * @param outputOffset Offset in outputShorts where decoded samples will be placed.
+     * Decodifica un frame Opus directo al ByteBuffer de salida para AudioTrack.
+     * @param input Buffer con el paquete; NO se muta su position final.
+     * @param inputOffset Offset del payload dentro del input.
+     * @param inputSize Tamaño del payload Opus en bytes.
+     * @param outputByteBuffer Buffer destino PCM 16-bit (queda listo para escribir).
      * @param frameSize Muestras por canal (960 para 20ms @ 48kHz).
-     * @param decodeFEC Si true, decodifica el FEC inband del paquete (PLC del frame previo); si no, frame normal.
-     * @return Number of samples per channel decoded, or negative on error.
-     */
-    fun decode(
-        input: ByteBuffer,
-        inputOffset: Int,
-        inputSize: Int,
-        outputShorts: ShortArray,
-        outputOffset: Int = 0,
-        frameSize: Int = 960,
-        decodeFEC: Boolean = false
-    ): Int {
-        val dec = decoder ?: return -1
-        return try {
-            val originalPos = input.position()
-            input.position(inputOffset)
-            input.get(rawInputArray, 0, inputSize)
-            input.position(originalPos)
-
-            val decoded = dec.decode(
-                rawInputArray,
-                0,
-                inputSize,
-                outputShorts,
-                outputOffset,
-                frameSize,
-                decodeFEC
-            )
-            decoded
-        } catch (e: OpusException) {
-            Log.e(TAG, "Opus decoding error: ${e.message}")
-            -1
-        } catch (e: Exception) {
-            Log.e(TAG, "Unexpected error during Opus decode: ${e.message}", e)
-            -1
-        }
-    }
-
-    /**
-     * Decodes directly into a DirectByteBuffer for AudioTrack consumption.
+     * @param decodeFEC Si true, decodifica el FEC inband (PLC del frame previo).
+     * @return Muestras por canal decodificadas, o negativo en error.
      */
     fun decodeToByteBuffer(
         input: ByteBuffer,
@@ -88,28 +49,29 @@ class OpusDecoderWrapper(
         frameSize: Int = 960,
         decodeFEC: Boolean = false
     ): Int {
-        val samplesDecodedPerChannel = decode(
-            input,
-            inputOffset,
-            inputSize,
-            rawOutputArray,
-            0,
-            frameSize,
-            decodeFEC
-        )
-
-        if (samplesDecodedPerChannel > 0) {
-            val totalShorts = samplesDecodedPerChannel * channels
-            val totalBytes = totalShorts * 2
-
-            outputByteBuffer.clear()
-            val shortBuf = outputByteBuffer.asShortBuffer()
-            shortBuf.put(rawOutputArray, 0, totalShorts)
-            outputByteBuffer.position(0)
-            outputByteBuffer.limit(totalBytes)
+        val dec = decoder ?: return -1
+        val decoded = try {
+            val originalPos = input.position()
+            input.position(inputOffset)
+            input.get(rawInputArray, 0, inputSize)
+            input.position(originalPos)
+            dec.decode(rawInputArray, 0, inputSize, rawOutputArray, 0, frameSize, decodeFEC)
+        } catch (e: OpusException) {
+            Log.e(TAG, "Opus decoding error: ${e.message}")
+            -1
+        } catch (e: Exception) {
+            Log.e(TAG, "Unexpected error during Opus decode: ${e.message}", e)
+            -1
         }
 
-        return samplesDecodedPerChannel
+        if (decoded > 0) {
+            val totalShorts = decoded * channels
+            outputByteBuffer.clear()
+            outputByteBuffer.asShortBuffer().put(rawOutputArray, 0, totalShorts)
+            outputByteBuffer.position(0)
+            outputByteBuffer.limit(totalShorts * 2)
+        }
+        return decoded
     }
 
     fun release() {

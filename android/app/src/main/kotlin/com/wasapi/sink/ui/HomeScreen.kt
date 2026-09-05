@@ -219,7 +219,7 @@ fun HomeScreen(
 
                 Text(
                     text = when {
-                        uiState.isPlaying && isConnected -> "Escuchando audio del PC · WS/Opus"
+                        uiState.isPlaying && isConnected -> "Escuchando audio del PC"
                         uiState.isPlaying -> "Conectando al stream de audio..."
                         else -> "Toca para escuchar el audio del PC"
                     },
