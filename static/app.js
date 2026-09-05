@@ -119,6 +119,7 @@
     if (!data || data.byteLength < 8 || !opusDecoder) return;
     var v = new DataView(data);
     var seq = v.getUint32(0, false);
+    // ponytail: ts no se consume (jitter es FIFO puro, decoder WASM no usa timestamps).
     var opus = new Uint8Array(data, 8);
     lastFrameTs = Date.now();
     if (lastSeq !== -1 && seq > lastSeq + 1) {
