@@ -17,7 +17,7 @@ pub async fn run_websocket_server(
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(&addr).await?;
-    tracing::info!("Audio WebSocket server listening on ws://{}", addr);
+    eprintln!("[ws] server listening on ws://{}", addr);
 
     loop {
         tokio::select! {
@@ -29,13 +29,13 @@ pub async fn run_websocket_server(
                         tokio::spawn(handle_client(stream, client_addr, client_rx, client_metrics));
                     }
                     Err(e) => {
-                        tracing::warn!("Accept error: {:?}", e);
+                        eprintln!("[ws] accept error: {:?}", e);
                     }
                 }
             }
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
-                    tracing::info!("WebSocket server shutting down gracefully");
+                    eprintln!("[ws] shutting down");
                     break;
                 }
             }
@@ -53,19 +53,19 @@ async fn handle_client(
 ) {
     // Disable Nagle's algorithm for low-latency TCP delivery
     if let Err(e) = stream.set_nodelay(true) {
-        tracing::warn!("Failed to set TCP_NODELAY for {}: {:?}", addr, e);
+        eprintln!("[ws] TCP_NODELAY failed for {}: {:?}", addr, e);
     }
 
     let ws_stream = match accept_async(stream).await {
         Ok(ws) => ws,
         Err(e) => {
-            tracing::warn!("WebSocket handshake failed with {}: {:?}", addr, e);
+            eprintln!("[ws] handshake failed with {}: {:?}", addr, e);
             return;
         }
     };
 
     metrics.active_clients.fetch_add(1, Ordering::Relaxed);
-    tracing::info!("Client connected: {}", addr);
+    eprintln!("[ws] client connected: {}", addr);
 
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
     let (client_tx, mut client_rx) = mpsc::channel::<Message>(MAX_PENDING_AUDIO_FRAMES);
@@ -75,7 +75,7 @@ async fn handle_client(
     let writer_task = tokio::spawn(async move {
         while let Some(msg) = client_rx.recv().await {
             if let Err(e) = ws_sender.send(msg).await {
-                tracing::debug!("WebSocket write error: {:?}", e);
+                eprintln!("[ws] write error: {:?}", e);
                 break;
             }
         }
@@ -83,8 +83,13 @@ async fn handle_client(
 
     // Task 2: Distribute broadcast frames with drop-tail backpressure
     let distributor_task = tokio::spawn(async move {
-        while let Ok(frame) = audio_rx.recv().await {
-            queue.try_push_frame(frame);
+        loop {
+            match audio_rx.recv().await {
+                Ok(frame) => queue.try_push_frame(frame),
+                // ponytail: distributor lento salta hueco y sigue; sin esto Lagged cerraba el stream en silencio.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
         }
     });
 
@@ -103,5 +108,5 @@ async fn handle_client(
     writer_task.abort();
     distributor_task.abort();
     metrics.active_clients.fetch_sub(1, Ordering::Relaxed);
-    tracing::info!("Client disconnected: {}", addr);
+    eprintln!("[ws] client disconnected: {}", addr);
 }

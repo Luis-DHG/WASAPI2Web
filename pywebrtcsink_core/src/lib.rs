@@ -5,7 +5,6 @@ use pyo3::prelude::*;
 use tokio::sync::{broadcast, watch};
 
 use crate::audio::resampler::LinearResampler;
-use crate::audio::ring_buffer::create_audio_ring_buffer;
 use crate::audio::wasapi::WasapiCaptureLoopback;
 use crate::codec::opus::OpusPipeline;
 use crate::metrics::EngineMetrics;
@@ -24,6 +23,7 @@ pub struct PyWasapiSinkEngine {
     main_thread: Option<JoinHandle<()>>,
     device_sample_rate: Arc<std::sync::atomic::AtomicU32>,
     device_channels: Arc<std::sync::atomic::AtomicU32>,
+    device_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[pymethods]
@@ -37,6 +37,7 @@ impl PyWasapiSinkEngine {
             main_thread: None,
             device_sample_rate: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             device_channels: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            device_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -53,6 +54,7 @@ impl PyWasapiSinkEngine {
 
         let dev_rate_atom = self.device_sample_rate.clone();
         let dev_chan_atom = self.device_channels.clone();
+        let dev_gen_atom = self.device_generation.clone();
 
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
 
@@ -60,11 +62,18 @@ impl PyWasapiSinkEngine {
             .name("pywebrtcsink-main".to_string())
             .spawn(move || {
                 // 1. RingBuffer for raw PCM samples: 1 sec buffer capacity
-                let (ring_producer, mut ring_consumer) = create_audio_ring_buffer(48000 * 2 * 2);
+                let (ring_producer, mut ring_consumer) = rtrb::RingBuffer::new(48000 * 2 * 2);
                 let (audio_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(64);
 
                 // 2. Start WASAPI Capture Loopback
-                let mut wasapi = match WasapiCaptureLoopback::start(ring_producer, is_running.clone(), metrics.clone()) {
+                let mut wasapi = match WasapiCaptureLoopback::start(
+                    ring_producer,
+                    is_running.clone(),
+                    metrics.clone(),
+                    dev_rate_atom.clone(),
+                    dev_chan_atom.clone(),
+                    dev_gen_atom.clone(),
+                ) {
                     Ok(w) => {
                         dev_rate_atom.store(w.device_info.sample_rate, Ordering::Relaxed);
                         dev_chan_atom.store(w.device_info.channels as u32, Ordering::Relaxed);
@@ -84,6 +93,9 @@ impl PyWasapiSinkEngine {
                 let encoder_running = is_running.clone();
                 let encoder_metrics = metrics.clone();
                 let enc_audio_tx = audio_tx.clone();
+                let enc_dev_rate = dev_rate_atom.clone();
+                let enc_dev_channels = dev_chan_atom.clone();
+                let enc_dev_gen = dev_gen_atom.clone();
 
                 let encoder_thread = std::thread::Builder::new()
                     .name("opus-encoder-rt".to_string())
@@ -97,16 +109,30 @@ impl PyWasapiSinkEngine {
                         };
 
                         let mut resampler = LinearResampler::new(in_rate, 48000, in_channels);
+                        let mut cur_channels = in_channels;
+                        let mut last_gen = enc_dev_gen.load(Ordering::SeqCst);
                         let mut raw_chunk = Vec::with_capacity(1920);
                         let mut resampled_chunk = Vec::with_capacity(1920);
                         let mut stereo_chunk = Vec::with_capacity(1920);
                         let mut encoded_packet = vec![0u8; 1275 + 8]; // Max Opus payload + 8B header
 
                         while encoder_running.load(Ordering::Relaxed) {
+                            // El formato puede cambiar si captura re-enumera
+                            // tras device lost: recrear resampler y descartar
+                            // resto viejo (seq/ts del Opus se preservan).
+                            let gen = enc_dev_gen.load(Ordering::SeqCst);
+                            if gen != last_gen {
+                                last_gen = gen;
+                                let new_rate = enc_dev_rate.load(Ordering::SeqCst).max(1);
+                                cur_channels = enc_dev_channels.load(Ordering::SeqCst).max(1) as usize;
+                                resampler = LinearResampler::new(new_rate, 48000, cur_channels);
+                                opus.discard_pending();
+                            }
+
                             raw_chunk.clear();
                             while let Ok(sample) = ring_consumer.pop() {
                                 raw_chunk.push(sample);
-                                if raw_chunk.len() >= 960 * in_channels {
+                                if raw_chunk.len() >= 960 * cur_channels {
                                     break;
                                 }
                             }
@@ -120,7 +146,7 @@ impl PyWasapiSinkEngine {
                             resampler.process(&raw_chunk, &mut resampled_chunk);
 
                             stereo_chunk.clear();
-                            if in_channels == 1 {
+                            if cur_channels == 1 {
                                 // Mono to stereo expansion
                                 for &s in &resampled_chunk {
                                     stereo_chunk.push(s);
@@ -172,11 +198,20 @@ impl PyWasapiSinkEngine {
 
         // Wait for WASAPI initialization result while releasing the GIL
         py.allow_threads(move || {
-            match ready_rx.recv() {
+            let result = match ready_rx.recv() {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(e)) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
                 Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(format!("Engine startup channel error: {:?}", e))),
+            };
+            if result.is_err() {
+                // Init fallo: hilo main ya termino. Reset flag + join para
+                // no dejar restart muerto ("already running" eterno).
+                self.running.store(false, Ordering::SeqCst);
+                if let Some(handle) = self.main_thread.take() {
+                    let _ = handle.join();
+                }
             }
+            result
         })
     }
 

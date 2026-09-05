@@ -33,6 +33,12 @@ impl OpusPipeline {
         })
     }
 
+    /// Descarta muestras acumuladas sin cerrar frame (cambio de formato).
+    /// Mantiene seq/ts para no romper la continuidad del stream.
+    pub fn discard_pending(&mut self) {
+        self.pcm_accumulator.clear();
+    }
+
     /// Feeds PCM samples and encodes whenever a 20ms frame (960 samples/ch) is full.
     /// Returns the total bytes written into `out_packet` (including the 8-byte header), or None if more samples are needed.
     #[inline]
@@ -57,12 +63,5 @@ impl OpusPipeline {
         self.timestamp = self.timestamp.wrapping_add(960);
 
         Ok(Some(payload_offset + encoded_len))
-    }
-
-    pub fn reset(&mut self) {
-        self.sequence = 0;
-        self.timestamp = 0;
-        self.pcm_accumulator.clear();
-        let _ = self.encoder.reset_state();
     }
 }
