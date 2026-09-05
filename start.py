@@ -70,6 +70,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         log.debug(fmt, *args)
 
     def do_POST(self):
+        try:
+            body_len = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            body_len = 0
+        if body_len > 0:
+            self.rfile.read(body_len)
         if self.path == "/api/pc/media-key":
             try:
                 VK_MEDIA_PLAY_PAUSE = 0xB3
