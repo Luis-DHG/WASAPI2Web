@@ -19,8 +19,6 @@ const SUBTYPE_IEEE_FLOAT: GUID = GUID::from_u128(0x00000003_0000_0010_8000_00aa0
 pub struct WasapiDeviceInfo {
     pub sample_rate: u32,
     pub channels: u16,
-    pub bits_per_sample: u16,
-    pub is_float: bool,
 }
 
 pub struct WasapiCaptureLoopback {
@@ -36,6 +34,14 @@ fn sleep_retry(running: &Arc<AtomicBool>) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Push al ring con conteo de overflow (distingue drop de captura vs drop TCP).
+#[inline]
+fn push_sample(producer: &mut Producer<f32>, metrics: &EngineMetrics, sample: f32) {
+    if producer.push(sample).is_err() {
+        metrics.frames_dropped_ring.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -214,8 +220,6 @@ impl WasapiCaptureLoopback {
                             let _ = info_tx.send(Ok(WasapiDeviceInfo {
                                 sample_rate,
                                 channels,
-                                bits_per_sample,
-                                is_float,
                             }));
                             first_init = false;
                         }
@@ -232,7 +236,7 @@ impl WasapiCaptureLoopback {
 
                         // ponytail: default timer resolution de Windows es 15.6ms y con ella
                         // WaitForSingleObject duerme de mas, matando la cadencia de 50 fps.
-                        unsafe { windows::Win32::Media::timeBeginPeriod(1) };
+                        windows::Win32::Media::timeBeginPeriod(1);
 
                         while is_running.load(Ordering::Relaxed) && !device_lost {
                             let now = std::time::Instant::now();
@@ -245,7 +249,7 @@ impl WasapiCaptureLoopback {
                                 }
                                 if ticks > 0 {
                                     for _ in 0..(ticks * frames_per_tick * channel_count) {
-                                        let _ = ring_producer.push(0.0f32);
+                                        push_sample(&mut ring_producer, &metrics, 0.0f32);
                                     }
                                     metrics.pcm_silent_injected
                                         .fetch_add((ticks * frames_per_tick) as u64, Ordering::Relaxed);
@@ -304,18 +308,18 @@ impl WasapiCaptureLoopback {
                                     // AUDCLNT_BUFFERFLAGS_SILENT: Inject PCM zeros
                                     metrics.pcm_silent_injected.fetch_add(num_frames as u64, Ordering::Relaxed);
                                     for _ in 0..total_samples {
-                                        let _ = ring_producer.push(0.0f32);
+                                        push_sample(&mut ring_producer, &metrics, 0.0f32);
                                     }
                                 } else if is_float && bits_per_sample == 32 {
                                     let float_slice = std::slice::from_raw_parts(p_data as *const f32, total_samples);
                                     for &sample in float_slice {
-                                        let _ = ring_producer.push(sample);
+                                        push_sample(&mut ring_producer, &metrics, sample);
                                     }
                                 } else if bits_per_sample == 16 {
                                     let i16_slice = std::slice::from_raw_parts(p_data as *const i16, total_samples);
                                     for &sample in i16_slice {
                                         let float_sample = (sample as f32) / 32768.0f32;
-                                        let _ = ring_producer.push(float_sample);
+                                        push_sample(&mut ring_producer, &metrics, float_sample);
                                     }
                                 } else if bits_per_sample == 24 {
                                     // 24-bit PCM in 3 bytes per sample
@@ -323,13 +327,13 @@ impl WasapiCaptureLoopback {
                                     for chunk in bytes.chunks_exact(3) {
                                         let sample_i32 = ((chunk[0] as i32) | ((chunk[1] as i32) << 8) | ((chunk[2] as i8 as i32) << 16)) << 8;
                                         let float_sample = (sample_i32 as f32) / 2147483648.0f32;
-                                        let _ = ring_producer.push(float_sample);
+                                        push_sample(&mut ring_producer, &metrics, float_sample);
                                     }
                                 } else if bits_per_sample == 32 {
                                     let i32_slice = std::slice::from_raw_parts(p_data as *const i32, total_samples);
                                     for &sample in i32_slice {
                                         let float_sample = (sample as f32) / 2147483648.0f32;
-                                        let _ = ring_producer.push(float_sample);
+                                        push_sample(&mut ring_producer, &metrics, float_sample);
                                     }
                                 }
 
@@ -340,7 +344,7 @@ impl WasapiCaptureLoopback {
                         let _ = audio_client.Stop();
                         let _ = CloseHandle(event_handle);
                         // ponytail: restaurar resolution (process-wide).
-                        unsafe { windows::Win32::Media::timeEndPeriod(1) };
+                        windows::Win32::Media::timeEndPeriod(1);
 
                         if device_lost && is_running.load(Ordering::Relaxed) {
                             sleep_retry(&is_running);

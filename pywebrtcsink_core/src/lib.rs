@@ -228,19 +228,16 @@ impl PyWasapiSinkEngine {
         Ok(())
     }
 
-    pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::Relaxed)
-    }
-
     pub fn get_metrics(&self) -> PyResult<PyMetrics> {
-        let snap = self.metrics.snapshot();
+        let m = &self.metrics;
         Ok(PyMetrics {
-            frames_captured: snap.frames_captured,
-            pcm_silent_injected: snap.pcm_silent_injected,
-            frames_encoded: snap.frames_encoded,
-            bytes_broadcasted: snap.bytes_broadcasted,
-            frames_dropped_tcp: snap.frames_dropped_tcp,
-            active_clients: snap.active_clients,
+            frames_captured: m.frames_captured.load(Ordering::Relaxed),
+            pcm_silent_injected: m.pcm_silent_injected.load(Ordering::Relaxed),
+            frames_encoded: m.frames_encoded.load(Ordering::Relaxed),
+            bytes_broadcasted: m.bytes_broadcasted.load(Ordering::Relaxed),
+            frames_dropped_tcp: m.frames_dropped_tcp.load(Ordering::Relaxed),
+            frames_dropped_ring: m.frames_dropped_ring.load(Ordering::Relaxed),
+            active_clients: m.active_clients.load(Ordering::Relaxed),
         })
     }
 
@@ -265,6 +262,8 @@ pub struct PyMetrics {
     pub bytes_broadcasted: u64,
     #[pyo3(get)]
     pub frames_dropped_tcp: u64,
+    #[pyo3(get)]
+    pub frames_dropped_ring: u64,
     #[pyo3(get)]
     pub active_clients: usize,
 }

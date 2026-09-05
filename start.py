@@ -14,6 +14,7 @@ from __future__ import annotations
 import ctypes
 import http.server
 import logging
+import os
 import socket
 import threading
 
@@ -52,7 +53,9 @@ def get_local_ip(default: str = "127.0.0.1") -> str:
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None):
             ip = info[4][0]
-            if ":" not in ip and not ip.startswith("127."):
+            # ponytail: 172.x de getaddrinfo suele ser virtual (WARP/Hyper-V);
+            # el dial por ruta igual lo captura si la LAN real vive ahi.
+            if ":" not in ip and not ip.startswith("127.") and not ip.startswith("172."):
                 candidates.append(ip)
     except OSError:
         pass
@@ -103,7 +106,7 @@ def main() -> None:
 
     server = http.server.ThreadingHTTPServer(
         ("0.0.0.0", HTTP_PORT),
-        partial(Handler, directory="static"),
+        partial(Handler, directory=os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")),
     )
     threading.Thread(target=server.serve_forever, daemon=True).start()
     ip = get_local_ip()

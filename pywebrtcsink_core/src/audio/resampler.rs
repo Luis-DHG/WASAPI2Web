@@ -1,6 +1,4 @@
 pub struct LinearResampler {
-    in_rate: f64,
-    out_rate: f64,
     ratio: f64,
     channels: usize,
     phase: f64,
@@ -9,13 +7,8 @@ pub struct LinearResampler {
 
 impl LinearResampler {
     pub fn new(in_rate: u32, out_rate: u32, channels: usize) -> Self {
-        let in_rate_f = in_rate as f64;
-        let out_rate_f = out_rate as f64;
-        let ratio = in_rate_f / out_rate_f;
         Self {
-            in_rate: in_rate_f,
-            out_rate: out_rate_f,
-            ratio,
+            ratio: in_rate as f64 / out_rate as f64,
             channels,
             phase: 0.0,
             last_samples: vec![0.0f32; channels],
@@ -24,7 +17,7 @@ impl LinearResampler {
 
     /// Resample interleaved input to interleaved output.
     pub fn process(&mut self, input: &[f32], output: &mut Vec<f32>) {
-        if (self.in_rate - self.out_rate).abs() < 0.1 {
+        if self.ratio == 1.0 {
             output.extend_from_slice(input);
             return;
         }

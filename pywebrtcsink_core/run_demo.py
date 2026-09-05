@@ -36,6 +36,7 @@ def main():
                 f"Opus Encoded: {m.frames_encoded:6d} | "
                 f"Enviado: {m.bytes_broadcasted / 1024:8.1f} KB | "
                 f"TCP Drops: {m.frames_dropped_tcp:4d} | "
+                f"Ring Drops: {m.frames_dropped_ring:4d} | "
                 f"Clientes: {m.active_clients:2d}",
                 end="",
                 flush=True,

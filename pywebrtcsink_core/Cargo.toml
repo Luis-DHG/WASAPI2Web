@@ -7,7 +7,7 @@ description = "High-performance native WASAPI Loopback to Opus WebSocket streame
 
 [lib]
 name = "pywebrtcsink_core"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 
 [dependencies]
 # Python Native Extensions
@@ -27,17 +27,13 @@ windows = { version = "0.58.0", features = [
 audiopus = "0.3.0-rc.0"
 
 # Async Runtime & Networking
-tokio = { version = "1.39.0", features = ["full"] }
+tokio = { version = "1.39.0", features = ["rt-multi-thread", "net", "sync", "macros"] }
 tokio-tungstenite = "0.23.1"
 futures-util = { version = "0.3.30", default-features = false, features = ["sink", "std"] }
 anyhow = "1.0"
 
 # Lock-Free Audio RingBuffers
 rtrb = "0.3.1"
-
-# Logging & Telemetry
-tracing = "0.1.40"
-tracing-subscriber = "0.3.18"
 
 [profile.release]
 opt-level = 3
