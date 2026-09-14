@@ -46,6 +46,16 @@ impl PyWasapiSinkEngine {
             return Err(pyo3::exceptions::PyRuntimeError::new_err("Audio engine is already running"));
         }
 
+        // Rango legal de libopus para stereo: 500 bps - 512 kbps.
+        // Sin esto, un bitrate invalido moria dentro del hilo encoder con un
+        // eprintln invisible y el engine quedaba "running" sin emitir nada.
+        if !(500..=512_000).contains(&bitrate) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "bitrate {} fuera de rango (500..=512000 bps; ~64k-192k recomendado para stereo)",
+                bitrate
+            )));
+        }
+
         self.running.store(true, Ordering::SeqCst);
         let is_running = self.running.clone();
         let metrics = self.metrics.clone();
@@ -61,9 +71,13 @@ impl PyWasapiSinkEngine {
         let handle = std::thread::Builder::new()
             .name("pywebrtcsink-main".to_string())
             .spawn(move || {
-                // 1. RingBuffer for raw PCM samples: 1 sec buffer capacity
+                // 1. RingBuffer for raw PCM samples: 2 sec @ 48k stereo
+                // (headroom ante stalls del encoder; ~768 KiB de f32).
                 let (ring_producer, mut ring_consumer) = rtrb::RingBuffer::new(48000 * 2 * 2);
                 let (audio_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(64);
+                // Tick capture->encoder: despertar event-driven al llegar audio
+                // (antes: busy-poll de 1 ms). Coalescido: "hay datos en el ring".
+                let (tick_tx, tick_rx) = std::sync::mpsc::sync_channel::<()>(8);
 
                 // 2. Start WASAPI Capture Loopback
                 let mut wasapi = match WasapiCaptureLoopback::start(
@@ -73,6 +87,7 @@ impl PyWasapiSinkEngine {
                     dev_rate_atom.clone(),
                     dev_chan_atom.clone(),
                     dev_gen_atom.clone(),
+                    tick_tx,
                 ) {
                     Ok(w) => {
                         dev_rate_atom.store(w.device_info.sample_rate, Ordering::Relaxed);
@@ -118,8 +133,9 @@ impl PyWasapiSinkEngine {
 
                         while encoder_running.load(Ordering::Relaxed) {
                             // El formato puede cambiar si captura re-enumera
-                            // tras device lost: recrear resampler y descartar
-                            // resto viejo (seq/ts del Opus se preservan).
+                            // tras device lost: recrear resampler, descartar
+                            // resto viejo y drenar el ring (todo lo pusheado
+                            // tras el bump de generation ya es formato nuevo).
                             let gen = enc_dev_gen.load(Ordering::SeqCst);
                             if gen != last_gen {
                                 last_gen = gen;
@@ -127,6 +143,7 @@ impl PyWasapiSinkEngine {
                                 cur_channels = enc_dev_channels.load(Ordering::SeqCst).max(1) as usize;
                                 resampler = LinearResampler::new(new_rate, 48000, cur_channels);
                                 opus.discard_pending();
+                                while ring_consumer.pop().is_ok() {}
                             }
 
                             raw_chunk.clear();
@@ -138,7 +155,17 @@ impl PyWasapiSinkEngine {
                             }
 
                             if raw_chunk.is_empty() {
-                                std::thread::sleep(std::time::Duration::from_millis(1));
+                                // ponytail: park hasta tick de captura o timeout
+                                // de seguridad (si captura muere, el hilo sigue
+                                // chequeando running). No busy-poll.
+                                let _ = tick_rx.recv_timeout(std::time::Duration::from_millis(50));
+                                continue;
+                            }
+
+                            // ponytail: captura pudo re-enumerar durante el pop
+                            // → chunk mezcla formatos; descartarlo entero (la
+                            // proxima vuelta recrea el resampler con gen nuevo).
+                            if enc_dev_gen.load(Ordering::SeqCst) != gen {
                                 continue;
                             }
 
