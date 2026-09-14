@@ -7,6 +7,7 @@ import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Build
 import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import com.wasapi.sink.audio.codec.OpusDecoderWrapper
 import okhttp3.OkHttpClient
@@ -71,6 +72,13 @@ class RealtimeAudioSinkEngine(
     private val isRunning = AtomicBoolean(false)
     private var isMuted = false
     private var audioThread: Thread? = null
+
+    // ponytail: watchdog de recepción. Un TCP "vivo" que deja de entregar
+    // frames (radio dormida, NAT medio-muerto) no lo detecta el ping de
+    // OkHttp a tiempo. Sin frames reales en >4s, cancel() dispara
+    // onFailure/onClosed → reconnect normal del service.
+    @Volatile
+    private var lastRxAt = 0L
 
     // Estructuras Lock-Free / Concurrentes pre-asignadas
     private val packetPool = ArrayBlockingQueue<AudioPacket>(POOL_CAPACITY)
@@ -152,9 +160,8 @@ class RealtimeAudioSinkEngine(
 
     fun setMuted(muted: Boolean) {
         isMuted = muted
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            audioTrack?.setVolume(if (muted) 0.0f else 1.0f)
-        }
+        Log.i(TAG, "setMuted($muted) → volumen ${if (muted) 0 else 1}")
+        audioTrack?.setVolume(if (muted) 0.0f else 1.0f)
     }
 
     fun start() {
@@ -182,33 +189,49 @@ class RealtimeAudioSinkEngine(
         connectWebSocket()
     }
 
-    private fun formatWsUrl(url: String): String {
-        // ponytail: el motor Rust publica SIEMPRE en ws://<host>:8090 (raíz, sin path).
-        // La URL guardada apunta al HTTP 8080 (UI + media-key); acá extraemos solo el host.
-        var host = url.trim()
-            .removePrefix("http://").removePrefix("https://")
-            .removePrefix("ws://").removePrefix("wss://")
-        val slash = host.indexOf('/')
-        if (slash >= 0) host = host.substring(0, slash)
-        val colon = host.indexOf(':')
-        if (colon >= 0) host = host.substring(0, colon)
-        return "ws://$host:8090"
+    /**
+     * Resuelve el puerto WS preguntando a /api/config del server (única fuente
+     * de verdad; fallback 8090 si el GET falla). Corre en hilo propio para no
+     * bloquear al caller.
+     */
+    private fun resolveWsUrl(serverUrl: String, onResolved: (String) -> Unit) {
+        Thread({
+            var base = serverUrl.trim().trimEnd('/')
+            if (!base.startsWith("http://") && !base.startsWith("https://")) base = "http://$base"
+            val wsPort = try {
+                val req = Request.Builder().url("$base/api/config").build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) throw java.io.IOException("HTTP ${resp.code}")
+                    org.json.JSONObject(resp.body?.string() ?: "").optInt("ws_port", 8090)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "No pude leer /api/config (${e.message}); fallback ws_port=8090")
+                8090
+            }
+            // ponytail: del base solo importa el host; el WS cuelga de la raíz.
+            val host = base.removePrefix("http://").removePrefix("https://")
+                .substringBefore('/').substringBefore(':')
+            onResolved("ws://$host:$wsPort")
+        }, "ws-url-resolver").start()
     }
 
     private fun connectWebSocket() {
-        val wsUrl = formatWsUrl(serverWsUrl)
-        Log.i(TAG, "Conectando WebSocket a: $wsUrl")
+        resolveWsUrl(serverWsUrl) { wsUrl ->
+            if (!isRunning.get()) return@resolveWsUrl
+            Log.i(TAG, "Conectando WebSocket a: $wsUrl")
 
-        val request = Request.Builder().url(wsUrl).build()
+            val request = Request.Builder().url(wsUrl).build()
         webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "WebSocket conectado con el backend")
                 lastSequenceNumber = -1L
+                lastRxAt = SystemClock.elapsedRealtime()
                 onStateChange?.invoke(EngineState.CONNECTED)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 if (!isRunning.get()) return
+                lastRxAt = SystemClock.elapsedRealtime()
                 val length = bytes.size
                 if (length < HEADER_SIZE_BYTES) return
 
@@ -261,7 +284,8 @@ class RealtimeAudioSinkEngine(
                     onStateChange?.invoke(EngineState.DISCONNECTED)
                 }
             }
-        })
+            })
+        }
     }
 
     /**
@@ -290,7 +314,16 @@ class RealtimeAudioSinkEngine(
                 }
 
                 // Esperar el siguiente paquete (máximo 25ms para evitar bloquear indefinidamente)
-                val packet = jitterQueue.poll(25, TimeUnit.MILLISECONDS) ?: continue
+                val packet = jitterQueue.poll(25, TimeUnit.MILLISECONDS)
+                if (packet == null) {
+                    val lastRx = lastRxAt
+                    if (lastRx > 0L && SystemClock.elapsedRealtime() - lastRx > 4000L) {
+                        Log.w(TAG, "Sin frames por >4s con socket abierto. Forzando reconexión.")
+                        lastRxAt = 0L
+                        webSocket?.cancel()
+                    }
+                    continue
+                }
 
                 // Hueco de secuencia: el encoder emite FEC inband, asi que decodificar
                 // el paquete actual con FEC recupera el frame previo perdido (PLC real).

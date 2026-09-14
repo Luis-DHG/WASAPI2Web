@@ -105,10 +105,8 @@ async fn handle_client(
     while let Some(msg_result) = ws_receiver.next().await {
         match msg_result {
             Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(_data)) => {
-                // Ping-pong handled automatically by tungstenite
-            }
             Err(_) => break,
+            // ponytail: pings/pongs los responde tungstenite solo
             _ => {}
         }
     }

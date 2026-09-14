@@ -60,13 +60,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.wasapi.sink.service.ConnectionState
+import com.wasapi.sink.audio.engine.EngineState
 import com.wasapi.sink.service.AudioForegroundService
 import com.wasapi.sink.service.ServiceUiState
 import com.wasapi.sink.ui.theme.AccentCyan
 import com.wasapi.sink.ui.theme.AmberWarn
 import com.wasapi.sink.ui.theme.AmberWarnBg
-import com.wasapi.sink.ui.theme.AmberWarnLight
 import com.wasapi.sink.ui.theme.BgDark
 import com.wasapi.sink.ui.theme.CardBg
 import com.wasapi.sink.ui.theme.CardBorder
@@ -99,7 +98,7 @@ fun HomeScreen(
         if (serverUrlInput.isNotBlank()) onServerUrlChanged(serverUrlInput)
     }
 
-    val isConnected = uiState.connectionState == ConnectionState.CONNECTED
+    val isConnected = uiState.connectionState == EngineState.CONNECTED
     val isControlsEnabled = uiState.isPlaying && isConnected
 
     BoxWithConstraints(
@@ -243,9 +242,6 @@ fun HomeScreen(
                     text = if (uiState.isMuted) "Silenciado" else "Silenciar",
                     icon = if (uiState.isMuted) IconVolumeOff else IconVolumeUp,
                     isActive = uiState.isMuted,
-                    activeBg = DangerRedBg,
-                    activeBorder = DangerRed,
-                    activeFg = DangerRedLight,
                     enabled = isControlsEnabled,
                     modifier = Modifier.fillMaxWidth(),
                     onClick = {
@@ -270,8 +266,8 @@ fun HomeScreen(
                     text = "Play/Pause PC",
                     icon = Icons.Default.PlayArrow,
                     isActive = false,
-                    customBg = mediaKeyBg,
-                    customBorder = mediaKeyBorder,
+                    bg = mediaKeyBg,
+                    border = mediaKeyBorder,
                     enabled = isControlsEnabled && !mediaKeyPulsing,
                     modifier = Modifier.fillMaxWidth(),
                     onClick = {
@@ -290,13 +286,13 @@ fun HomeScreen(
 }
 
 @Composable
-fun StatusBadge(state: ConnectionState) {
+fun StatusBadge(state: EngineState) {
     val (text, color, bg) = when (state) {
-        ConnectionState.CONNECTED -> Triple("Conectado", AccentCyan, AccentCyan.copy(alpha = 0.1f))
-        ConnectionState.CONNECTING -> Triple("conectando...", AmberWarn, AmberWarn.copy(alpha = 0.1f))
-        ConnectionState.RECONNECTING -> Triple("re-conectando...", AmberWarn, AmberWarn.copy(alpha = 0.1f))
-        ConnectionState.ERROR -> Triple("error", DangerRed, DangerRed.copy(alpha = 0.1f))
-        ConnectionState.DISCONNECTED -> Triple("Desconectado", DangerRed, DangerRed.copy(alpha = 0.1f))
+        EngineState.CONNECTED -> Triple("Conectado", AccentCyan, AccentCyan.copy(alpha = 0.1f))
+        EngineState.CONNECTING -> Triple("conectando...", AmberWarn, AmberWarn.copy(alpha = 0.1f))
+        EngineState.RECONNECTING -> Triple("re-conectando...", AmberWarn, AmberWarn.copy(alpha = 0.1f))
+        EngineState.ERROR -> Triple("error", DangerRed, DangerRed.copy(alpha = 0.1f))
+        EngineState.DISCONNECTED -> Triple("Desconectado", DangerRed, DangerRed.copy(alpha = 0.1f))
     }
 
     Box(
@@ -322,17 +318,12 @@ fun ControlButton(
     icon: ImageVector,
     isActive: Boolean,
     modifier: Modifier = Modifier,
-    activeBg: Color = DangerRedBg,
-    activeBorder: Color = DangerRed,
-    activeFg: Color = DangerRedLight,
-    customBg: Color? = null,
-    customBorder: Color? = null,
+    bg: Color = if (isActive) DangerRedBg else CardBg,
+    border: Color = if (isActive) DangerRed else CardBorder,
     enabled: Boolean = true,
     onClick: () -> Unit
 ) {
-    val bg = customBg ?: if (isActive) activeBg else CardBg
-    val border = customBorder ?: if (isActive) activeBorder else CardBorder
-    val fg = if (isActive) activeFg else FgLight
+    val fg = if (isActive) DangerRedLight else FgLight
 
     val alpha = if (enabled) 1.0f else 0.4f
 

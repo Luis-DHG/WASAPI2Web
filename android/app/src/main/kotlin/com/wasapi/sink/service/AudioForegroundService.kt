@@ -18,6 +18,8 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.support.v4.media.session.MediaSessionCompat
+import android.util.Log
+import android.widget.Toast
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -25,7 +27,6 @@ import com.wasapi.sink.MainActivity
 import com.wasapi.sink.R
 import com.wasapi.sink.audio.engine.EngineState
 import com.wasapi.sink.audio.engine.RealtimeAudioSinkEngine
-import com.wasapi.sink.control.MediaKeyClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -37,19 +38,18 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
+import java.util.concurrent.TimeUnit
 import kotlin.math.min
 import kotlin.math.pow
 
-enum class ConnectionState {
-    DISCONNECTED,
-    CONNECTING,
-    CONNECTED,
-    RECONNECTING,
-    ERROR
-}
-
 data class ServiceUiState(
-    val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
+    val connectionState: EngineState = EngineState.DISCONNECTED,
     val isPlaying: Boolean = false,
     val isMuted: Boolean = false
 )
@@ -64,34 +64,53 @@ class AudioForegroundService : Service() {
 
     private var mediaSession: MediaSessionCompat? = null
     private var audioSinkEngine: RealtimeAudioSinkEngine? = null
-    private val signallingClient = MediaKeyClient()
+    private val mediaKeyHttp = OkHttpClient.Builder().connectTimeout(5, TimeUnit.SECONDS).build()
 
     private var reconnectJob: Job? = null
     private var reconnectAttempts = 0
     private var currentServerUrl: String = ""
     private var lastStatusText: String = ""
 
+    // ponytail: el volumen se escribe por UN solo funnel. El bug "silencio
+    // tras background" era volumen clavado en 0 sin GAIN de vuelta; ahora
+    // duck es estado explícito y cualquier reconnect/screen-on re-aplica el
+    // volumen efectivo completo.
+    private var focusDucked = false
+
+    private fun applyVolume(reason: String) {
+        val effectiveMuted = _uiState.value.isMuted || focusDucked
+        Log.i(TAG, "applyVolume($reason): muted=$effectiveMuted (usuario=${_uiState.value.isMuted}, duck=$focusDucked)")
+        audioSinkEngine?.setMuted(effectiveMuted)
+    }
+
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == Intent.ACTION_SCREEN_ON) {
-                // Reafirmar volumen y estado
-                audioSinkEngine?.setMuted(_uiState.value.isMuted)
+                applyVolume("screen_on")
             }
         }
     }
 
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
-        if (change == AudioManager.AUDIOFOCUS_GAIN) {
-            audioSinkEngine?.setMuted(_uiState.value.isMuted)
-        } else if (change == AudioManager.AUDIOFOCUS_LOSS) {
-            stopStreaming()
-            stopSelf()
-        } else if (change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT ||
-            change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK
-        ) {
-            // ponytail: perdida transitoria (notificacion, asistente) solo duckeamos via mute;
-            // GAIN restaura desde _uiState. Solo LOSS permanente detiene el stream.
-            audioSinkEngine?.setMuted(true)
+        when (change) {
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                Log.i(TAG, "Audio focus GAIN (duck previo: $focusDucked)")
+                focusDucked = false
+                applyVolume("focus_gain")
+            }
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                Log.i(TAG, "Audio focus LOSS permanente. Deteniendo stream.")
+                focusDucked = false
+                stopStreaming()
+                stopSelf()
+            }
+            else -> {
+                // LOSS_TRANSIENT / LOSS_TRANSIENT_CAN_DUCK: duck temporal;
+                // el WS sigue vivo. GAIN restaura vía el mismo funnel.
+                Log.i(TAG, "Audio focus transitorio ($change). Duck ON.")
+                focusDucked = true
+                applyVolume("focus_transient")
+            }
         }
     }
 
@@ -126,12 +145,20 @@ class AudioForegroundService : Service() {
             ACTION_TOGGLE_MUTE -> {
                 val newMuted = !_uiState.value.isMuted
                 _uiState.value = _uiState.value.copy(isMuted = newMuted)
-                audioSinkEngine?.setMuted(newMuted)
+                applyVolume("toggle_mute")
                 updateNotification(lastStatusText)
             }
             ACTION_SEND_MEDIA_KEY -> {
                 serviceScope.launch {
-                    signallingClient.sendMediaKey(currentServerUrl)
+                    val result = postMediaKey(currentServerUrl)
+                    if (result.isFailure) {
+                        Log.w(TAG, "media-key falló: ${result.exceptionOrNull()?.message}")
+                        Toast.makeText(
+                            this@AudioForegroundService,
+                            "No llegó el Play/Pause al PC",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
                 }
             }
         }
@@ -152,7 +179,7 @@ class AudioForegroundService : Service() {
         reconnectAttempts = 0
         _uiState.value = _uiState.value.copy(
             isPlaying = true,
-            connectionState = ConnectionState.CONNECTING
+            connectionState = EngineState.CONNECTING
         )
 
         connectEngine(serverUrl)
@@ -169,33 +196,34 @@ class AudioForegroundService : Service() {
         }
 
         audioSinkEngine = engine
-        engine.setMuted(_uiState.value.isMuted)
+        applyVolume("engine_start")
         engine.start()
     }
 
     private fun handleEngineStateChange(engineState: EngineState) {
+        Log.i(TAG, "Engine state: $engineState")
         serviceScope.launch {
             val connState = when (engineState) {
                 EngineState.CONNECTED -> {
                     reconnectAttempts = 0
                     updateNotification("Conectado: $currentServerUrl")
-                    ConnectionState.CONNECTED
+                    EngineState.CONNECTED
                 }
-                EngineState.CONNECTING -> ConnectionState.CONNECTING
+                EngineState.CONNECTING -> EngineState.CONNECTING
                 EngineState.RECONNECTING -> {
                     scheduleReconnect()
-                    ConnectionState.RECONNECTING
+                    EngineState.RECONNECTING
                 }
                 EngineState.ERROR -> {
                     scheduleReconnect()
-                    ConnectionState.ERROR
+                    EngineState.ERROR
                 }
                 EngineState.DISCONNECTED -> {
                     if (_uiState.value.isPlaying) {
                         scheduleReconnect()
-                        ConnectionState.RECONNECTING
+                        EngineState.RECONNECTING
                     } else {
-                        ConnectionState.DISCONNECTED
+                        EngineState.DISCONNECTED
                     }
                 }
             }
@@ -214,7 +242,7 @@ class AudioForegroundService : Service() {
         )
         reconnectAttempts++
 
-        _uiState.value = _uiState.value.copy(connectionState = ConnectionState.RECONNECTING)
+        _uiState.value = _uiState.value.copy(connectionState = EngineState.RECONNECTING)
         updateNotification("Reconectando (${reconnectAttempts})...")
 
         reconnectJob = serviceScope.launch {
@@ -270,7 +298,7 @@ class AudioForegroundService : Service() {
 
         _uiState.value = _uiState.value.copy(
             isPlaying = false,
-            connectionState = ConnectionState.DISCONNECTED
+            connectionState = EngineState.DISCONNECTED
         )
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
@@ -285,6 +313,20 @@ class AudioForegroundService : Service() {
             }
         }
     }
+
+    // ponytail: un POST; sin clase aparte. OkHttp ya vive en el classpath por el engine.
+    private suspend fun postMediaKey(serverUrl: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val request = Request.Builder()
+                    .url("${serverUrl.trimEnd('/')}/api/pc/media-key")
+                    .post("{}".toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+                mediaKeyHttp.newCall(request).execute().use { resp ->
+                    if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}")
+                }
+            }
+        }
 
     private fun setupMediaSession() {
         mediaSession = MediaSessionCompat(this, "WasapiAudioSession").apply {
@@ -419,6 +461,7 @@ class AudioForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
+        private const val TAG = "AudioFgService"
         const val CHANNEL_ID = "wasapi_audio_playback"
         const val NOTIFICATION_ID = 1001
 

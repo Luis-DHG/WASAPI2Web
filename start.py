@@ -39,16 +39,9 @@ def get_local_ip(default: str = "127.0.0.1") -> str:
     """
     candidates: list[str] = []
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("203.0.113.1", 80))
-        candidates.append(s.getsockname()[0])
-        s.close()
-    except OSError:
-        pass
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s2:
-            s2.connect(("1.1.1.1", 80))
-            candidates.append(s2.getsockname()[0])
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("203.0.113.1", 80))
+            candidates.append(s.getsockname()[0])
     except OSError:
         pass
     try:

@@ -146,6 +146,12 @@ impl WasapiCaptureLoopback {
                             false
                         };
 
+                        // ponytail: GetMixFormat en shared mode es float32 siempre; si no,
+                        // avisar una vez por (re)enumeracion y soltar buffers (audio en silencio).
+                        if !(is_float && bits_per_sample == 32) {
+                            eprintln!("[wasapi] formato inesperado ({} bits, no float32): audio se descartara", bits_per_sample);
+                        }
+
                         // Initializing IAudioClient in Loopback + Event Callback mode
                         let flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
                         let buffer_duration_100ns = 200_000; // 20ms buffer
@@ -317,27 +323,10 @@ impl WasapiCaptureLoopback {
                                     for &sample in float_slice {
                                         push_sample(&mut ring_producer, &metrics, sample);
                                     }
-                                } else if bits_per_sample == 16 {
-                                    let i16_slice = std::slice::from_raw_parts(p_data as *const i16, total_samples);
-                                    for &sample in i16_slice {
-                                        let float_sample = (sample as f32) / 32768.0f32;
-                                        push_sample(&mut ring_producer, &metrics, float_sample);
-                                    }
-                                } else if bits_per_sample == 24 {
-                                    // 24-bit PCM in 3 bytes per sample
-                                    let bytes = std::slice::from_raw_parts(p_data, total_samples * 3);
-                                    for chunk in bytes.chunks_exact(3) {
-                                        let sample_i32 = ((chunk[0] as i32) | ((chunk[1] as i32) << 8) | ((chunk[2] as i8 as i32) << 16)) << 8;
-                                        let float_sample = (sample_i32 as f32) / 2147483648.0f32;
-                                        push_sample(&mut ring_producer, &metrics, float_sample);
-                                    }
-                                } else if bits_per_sample == 32 {
-                                    let i32_slice = std::slice::from_raw_parts(p_data as *const i32, total_samples);
-                                    for &sample in i32_slice {
-                                        let float_sample = (sample as f32) / 2147483648.0f32;
-                                        push_sample(&mut ring_producer, &metrics, float_sample);
-                                    }
                                 }
+                                // ponytail: GetMixFormat en shared mode SIEMPRE es float32; sin
+                                // decoders int 16/24/32 (nunca corrian). Formato raro = aviso
+                                // unico arriba; este buffer se suelta.
 
                                 let _ = capture_client.ReleaseBuffer(num_frames);
                             }
