@@ -53,6 +53,7 @@ impl WasapiCaptureLoopback {
         dev_rate: Arc<AtomicU32>,
         dev_channels: Arc<AtomicU32>,
         dev_generation: Arc<AtomicU64>,
+        tick_tx: std::sync::mpsc::SyncSender<()>,
     ) -> anyhow::Result<Self> {
         let (info_tx, info_rx) = std::sync::mpsc::sync_channel::<anyhow::Result<WasapiDeviceInfo>>(1);
         let is_running = running.clone();
@@ -253,6 +254,7 @@ impl WasapiCaptureLoopback {
                                     }
                                     metrics.pcm_silent_injected
                                         .fetch_add((ticks * frames_per_tick) as u64, Ordering::Relaxed);
+                                    let _ = tick_tx.try_send(());
 
                                     // Solo esperar datos si acabamos de inyectar suficiente.
                                     let sleep_ms = next_deadline

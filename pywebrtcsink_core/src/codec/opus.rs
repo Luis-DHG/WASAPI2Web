@@ -1,4 +1,4 @@
-use audiopus::coder::{Encoder, GenericCtl};
+use audiopus::coder::Encoder;
 use audiopus::{Application, Bitrate, Channels, SampleRate};
 
 pub struct OpusPipeline {

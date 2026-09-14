@@ -26,7 +26,10 @@
     return;
   }
 
-  var WS_PORT = 8090;
+  var wsPort = 8090;               // default; el server lo confirma via /api/config
+  fetch("/api/config").then(function (r) { return r.json(); }).then(function (c) {
+    if (c && c.ws_port) wsPort = c.ws_port;
+  }).catch(function () { });
   var TARGET_BUF_S = 0.06;         // 60ms de jitter buffer (3 frames de 20ms)
   var MAX_AHEAD_S = 0.5;           // techo de scheduling (vuelta de background)
   var RECONNECT_BASE_MS = 500, RECONNECT_MAX_MS = 5000;
@@ -61,7 +64,7 @@
     playing = p;
     playBtn.classList.toggle("playing", p);
     playLabel.textContent = p ? "ACTIVO" : "ESCUCHAR";
-    hintCtx.textContent = p ? "Escuchando audio del PC - WS/Opus" : "Toca para escuchar el audio del PC";
+    hintCtx.textContent = p ? "Escuchando audio del PC" : "Toca para escuchar el audio del PC";
     playIcon.innerHTML = p
       ? '<rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/>'
       : '<path d="M8 5v14l11-7z"/>';
@@ -141,7 +144,7 @@
   }
 
   function connect() {
-    ws = new WebSocket("ws://" + location.hostname + ":" + WS_PORT);
+    ws = new WebSocket("ws://" + location.hostname + ":" + wsPort);
     ws.binaryType = "arraybuffer";
     setBadge("conectando...", "recon");
 
