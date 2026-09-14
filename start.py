@@ -80,6 +80,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if body_len > 0:
             self.rfile.read(body_len)
         if self.path == "/api/pc/media-key":
+            log.info("media-key desde %s", self.client_address[0])
             try:
                 VK_MEDIA_PLAY_PAUSE = 0xB3
                 ctypes.windll.user32.keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 0, 0)
