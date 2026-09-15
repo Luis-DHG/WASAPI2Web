@@ -10,10 +10,68 @@ use crate::codec::opus::OpusPipeline;
 use crate::metrics::EngineMetrics;
 use crate::server::ws::run_websocket_server;
 
-mod audio;
-mod codec;
+// pub: las integration tests los usan (tests/channel_parity.rs, encoder_pipeline.rs).
+pub mod audio;
+pub mod codec;
 mod metrics;
 mod server;
+
+/// Downmix a stereo (ITU-R BS.775): el canal i del bloque interleaved es el
+/// i-esimo bit set de `mask` (LSB primero). Sin mask usable → primeros 2 ch.
+#[doc(hidden)] // pub solo para tests/ — no es interface de la fachada
+pub fn downmix_to_stereo(input: &[f32], channels: usize, mask: u32, out: &mut Vec<f32>) {
+    // Posiciones de speaker: bit bajo = canal antes. FL, FR, C, LFE, BL, BR, ..., SL, SR.
+    const FL: u32 = 0x1;
+    const FR: u32 = 0x2;
+    const FC: u32 = 0x4;
+    const LFE: u32 = 0x8;
+    const BL: u32 = 0x10;
+    const BR: u32 = 0x20;
+    const SL: u32 = 0x200;
+    const SR: u32 = 0x400;
+
+    let usable = (mask & (FL | FR)) == (FL | FR) && channels == mask.count_ones() as usize;
+    if !usable {
+        // Fallback: primeros dos canales tal cual.
+        for frame in input.chunks(channels) {
+            out.push(frame[0]);
+            out.push(if channels > 1 { frame[1] } else { frame[0] });
+        }
+        return;
+    }
+
+    // Indice interleaved de cada posicion de speaker que existe en la mask.
+    let mut idx_of = [usize::MAX; 18];
+    let mut idx = 0usize;
+    for bit in 0..32 {
+        if mask & (1u32 << bit) != 0 && idx < 18 {
+            idx_of[idx] = bit as usize;
+            idx += 1;
+        }
+    }
+    // inv: dado bit de speaker → indice en el frame
+    let at = |frame: &[f32], speaker: u32| -> f32 {
+        let bit = speaker.trailing_zeros() as usize;
+        for (i, &b) in idx_of.iter().enumerate().take(channels) {
+            if b == bit {
+                return frame[i];
+            }
+        }
+        0.0
+    };
+
+    let g = std::f32::consts::FRAC_1_SQRT_2; // 0.7071
+    for frame in input.chunks(channels) {
+        let fl = at(frame, FL);
+        let fr = at(frame, FR);
+        let c = at(frame, FC) * g;
+        let _ = LFE; // LFE se descarta por diseno
+        let l_sur = (at(frame, BL) + at(frame, SL)) * g;
+        let r_sur = (at(frame, BR) + at(frame, SR)) * g;
+        out.push((fl + c + l_sur).clamp(-1.0, 1.0));
+        out.push((fr + c + r_sur).clamp(-1.0, 1.0));
+    }
+}
 
 #[pyclass]
 pub struct PyWasapiSinkEngine {
@@ -23,6 +81,7 @@ pub struct PyWasapiSinkEngine {
     main_thread: Option<JoinHandle<()>>,
     device_sample_rate: Arc<std::sync::atomic::AtomicU32>,
     device_channels: Arc<std::sync::atomic::AtomicU32>,
+    device_channel_mask: Arc<std::sync::atomic::AtomicU32>,
     device_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -37,6 +96,7 @@ impl PyWasapiSinkEngine {
             main_thread: None,
             device_sample_rate: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             device_channels: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            device_channel_mask: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             device_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -64,6 +124,7 @@ impl PyWasapiSinkEngine {
 
         let dev_rate_atom = self.device_sample_rate.clone();
         let dev_chan_atom = self.device_channels.clone();
+        let dev_mask_atom = self.device_channel_mask.clone();
         let dev_gen_atom = self.device_generation.clone();
 
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
@@ -86,12 +147,13 @@ impl PyWasapiSinkEngine {
                     metrics.clone(),
                     dev_rate_atom.clone(),
                     dev_chan_atom.clone(),
+                    dev_mask_atom.clone(),
                     dev_gen_atom.clone(),
                     tick_tx,
                 ) {
                     Ok(w) => {
-                        dev_rate_atom.store(w.device_info.sample_rate, Ordering::Relaxed);
-                        dev_chan_atom.store(w.device_info.channels as u32, Ordering::Relaxed);
+                        // El hilo WASAPI ya publico rate/canales en los atomics
+                        // antes de responder info (wasapi.rs).
                         let _ = ready_tx.send(Ok(()));
                         w
                     }
@@ -110,6 +172,7 @@ impl PyWasapiSinkEngine {
                 let enc_audio_tx = audio_tx.clone();
                 let enc_dev_rate = dev_rate_atom.clone();
                 let enc_dev_channels = dev_chan_atom.clone();
+                let enc_dev_mask = dev_mask_atom.clone();
                 let enc_dev_gen = dev_gen_atom.clone();
 
                 let encoder_thread = std::thread::Builder::new()
@@ -125,6 +188,7 @@ impl PyWasapiSinkEngine {
 
                         let mut resampler = LinearResampler::new(in_rate, 48000, in_channels);
                         let mut cur_channels = in_channels;
+                        let mut cur_mask: u32 = enc_dev_mask.load(Ordering::SeqCst);
                         let mut last_gen = enc_dev_gen.load(Ordering::SeqCst);
                         let mut raw_chunk = Vec::with_capacity(1920);
                         let mut resampled_chunk = Vec::with_capacity(1920);
@@ -141,16 +205,27 @@ impl PyWasapiSinkEngine {
                                 last_gen = gen;
                                 let new_rate = enc_dev_rate.load(Ordering::SeqCst).max(1);
                                 cur_channels = enc_dev_channels.load(Ordering::SeqCst).max(1) as usize;
+                                cur_mask = enc_dev_mask.load(Ordering::SeqCst);
                                 resampler = LinearResampler::new(new_rate, 48000, cur_channels);
                                 opus.discard_pending();
                                 while ring_consumer.pop().is_ok() {}
                             }
 
                             raw_chunk.clear();
-                            while let Ok(sample) = ring_consumer.pop() {
-                                raw_chunk.push(sample);
-                                if raw_chunk.len() >= 960 * cur_channels {
-                                    break;
+                            {
+                                // Pop alineado a frame completo: un sample
+                                // suelto desplazaria la paridad L/R de todo
+                                // lo que sigue. El resto (<1 frame) queda en
+                                // el ring para la proxima vuelta.
+                                let avail = ring_consumer.slots();
+                                let take = (avail / cur_channels).min(960) * cur_channels;
+                                if take > 0 {
+                                    if let Ok(chunk) = ring_consumer.read_chunk(take) {
+                                        let (first, second) = chunk.as_slices();
+                                        raw_chunk.extend_from_slice(first);
+                                        raw_chunk.extend_from_slice(second);
+                                        chunk.commit_all();
+                                    }
                                 }
                             }
 
@@ -179,8 +254,13 @@ impl PyWasapiSinkEngine {
                                     stereo_chunk.push(s);
                                     stereo_chunk.push(s);
                                 }
-                            } else {
+                            } else if cur_channels == 2 {
                                 stereo_chunk.extend_from_slice(&resampled_chunk);
+                            } else {
+                                // >2 canales (5.1/7.1 por HDMI, Voicemeeter):
+                                // downmix ITU-R BS.775. L = FL + C·0.707 +
+                                // envolventes_izq·0.707; R simetrico. LFE fuera.
+                                downmix_to_stereo(&resampled_chunk, cur_channels, cur_mask, &mut stereo_chunk);
                             }
 
                             if let Ok(Some(bytes_written)) = opus.feed_and_encode(&stereo_chunk, &mut encoded_packet) {

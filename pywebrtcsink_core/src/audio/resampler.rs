@@ -17,6 +17,16 @@ impl LinearResampler {
 
     /// Resample interleaved input to interleaved output.
     pub fn process(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        debug_assert!(
+            input.len() % self.channels == 0,
+            "resampler recibio {} samples con {} canales: desbordaria la paridad L/R",
+            input.len(),
+            self.channels
+        );
+        // Defensa: nunca propagar un resto no alineado (rompe paridad stereo).
+        let aligned_len = input.len() - (input.len() % self.channels);
+        let input = &input[..aligned_len];
+
         if self.ratio == 1.0 {
             output.extend_from_slice(input);
             return;

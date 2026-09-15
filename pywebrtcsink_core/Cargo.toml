@@ -7,11 +7,16 @@ description = "High-performance native WASAPI Loopback to Opus WebSocket streame
 
 [lib]
 name = "pywebrtcsink_core"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# pyo3/extension-module vive SOLO para el .pyd que arma maturin; si va
+# siempre, `cargo test` no linkea en Windows.
+extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 # Python Native Extensions
-pyo3 = { version = "0.22.6", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.22.6", features = ["abi3-py39"] }
 
 # Windows Audio & MMCSS APIs
 windows = { version = "0.58.0", features = [
@@ -20,8 +25,7 @@ windows = { version = "0.58.0", features = [
     "Win32_System_Threading",
     "Win32_Media_Audio",
     "Win32_Media_Multimedia",
-    "Win32_Security",
-    "Win32_System_SystemInformation"
+    "Win32_Security"
 ] }
 
 # Opus Encoder

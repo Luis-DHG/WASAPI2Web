@@ -74,6 +74,28 @@ class OpusDecoderWrapper(
         return decoded
     }
 
+    /**
+     * PLC: decodificar con longitud 0 hace que Opus sintetice un frame
+     * extrapolado (relleno suavizado) para tapar un hueco de red.
+     */
+    fun decodePlc(outputByteBuffer: ByteBuffer, frameSize: Int = 960): Int {
+        val dec = decoder ?: return -1
+        val decoded = try {
+            dec.decode(rawInputArray, 0, 0, rawOutputArray, 0, frameSize, false)
+        } catch (e: Exception) {
+            Log.e(TAG, "PLC error: ${e.message}", e)
+            -1
+        }
+        if (decoded > 0) {
+            val totalShorts = decoded * channels
+            outputByteBuffer.clear()
+            outputByteBuffer.asShortBuffer().put(rawOutputArray, 0, totalShorts)
+            outputByteBuffer.position(0)
+            outputByteBuffer.limit(totalShorts * 2)
+        }
+        return decoded
+    }
+
     fun release() {
         decoder = null
     }

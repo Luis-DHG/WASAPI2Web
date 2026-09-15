@@ -59,7 +59,22 @@ class RealtimeAudioSinkEngine(
 
         // Umbral de ráfagas TCP: Si hay más de 3 frames (60ms) acumulados, se acelera el drenaje
         private const val MAX_JITTER_THRESHOLD_FRAMES = 3
+
+        // ponytail: cap de relleno PLC — >3 frames sintetizados seguidos suena
+        // robótico; hueco más grande = salto limpio, no relleno.
+        private const val MAX_PLC_FRAMES = 3
+
+        // Diagnóstico background-silence: cada 200 frames (~4s) log de salud
+        // del pipeline audio (decode → write → HAL).
+        private const val HEALTH_LOG_FRAMES = 200
     }
+
+    // Contadores de salud del pipeline (solo diagnóstico)
+    private var hbDecoded = 0L
+    private var hbWritten = 0L
+    private var hbPlc = 0L
+    private var hbFec = 0L
+    private var hbIdle = 0L
 
     data class AudioPacket(
         val buffer: ByteBuffer,
@@ -300,22 +315,21 @@ class RealtimeAudioSinkEngine(
 
         while (isRunning.get()) {
             try {
-                // Monitoreo de acumulación de ráfagas TCP (Catch-Up Policy)
-                val queueSize = jitterQueue.size
-                if (queueSize > MAX_JITTER_THRESHOLD_FRAMES) {
-                    // Drenar ráfagas para recuperar latencia mínima (Head-of-Line Recovery)
-                    val dropCount = queueSize - 1
-                    for (i in 0 until dropCount) {
-                        val dropped = jitterQueue.poll() ?: break
-                        packetPool.offer(dropped)
+                // Catch-up de ráfagas TCP: descartar de a 1 por tick. El FEC del
+                // siguiente frame tapa el hueco (drenar de golpe creaba huecos
+                // multi-frame que el FEC no alcanza a cubrir → chasquido).
+                if (jitterQueue.size > MAX_JITTER_THRESHOLD_FRAMES) {
+                    jitterQueue.poll()?.let {
+                        packetPool.offer(it)
                         droppedFramesCount++
                     }
-                    Log.w(TAG, "Ráfaga TCP detectada ($queueSize frames). Drenados $dropCount frames para recuperar latencia.")
                 }
 
                 // Esperar el siguiente paquete (máximo 25ms para evitar bloquear indefinidamente)
                 val packet = jitterQueue.poll(25, TimeUnit.MILLISECONDS)
                 if (packet == null) {
+                    hbIdle++
+                    logHealth("idle")
                     val lastRx = lastRxAt
                     if (lastRx > 0L && SystemClock.elapsedRealtime() - lastRx > 4000L) {
                         Log.w(TAG, "Sin frames por >4s con socket abierto. Forzando reconexión.")
@@ -325,11 +339,15 @@ class RealtimeAudioSinkEngine(
                     continue
                 }
 
-                // Hueco de secuencia: el encoder emite FEC inband, asi que decodificar
-                // el paquete actual con FEC recupera el frame previo perdido (PLC real).
+                // Hueco de secuencia: el FEC inband del paquete actual recupera el
+                // frame inmediatamente anterior; los frames perdidos previos se tapan
+                // con PLC (Opus sintetiza relleno suavizado en vez de bache de silencio).
                 if (lastSequenceNumber != -1L && packet.sequenceNumber > lastSequenceNumber + 1) {
                     val lostCount = packet.sequenceNumber - (lastSequenceNumber + 1)
                     Log.w(TAG, "Pérdida detectada: $lostCount paquetes omitidos (Seq: ${packet.sequenceNumber})")
+                    repeat((lostCount - 1).toInt().coerceAtMost(MAX_PLC_FRAMES)) {
+                        renderPlcFrame()
+                    }
                     renderPacket(packet, decodeFEC = true)
                 }
                 lastSequenceNumber = packet.sequenceNumber
@@ -367,27 +385,67 @@ class RealtimeAudioSinkEngine(
         ) ?: -1
 
         if (decodedSamples > 0) {
-            if (!isMuted) {
-                // Renderizado en AudioTrack
-                audioTrack?.let { track ->
-                    // ponytail: write parcial exige reintentar resto; dropearlo era underrun silencioso.
-                    while (pcmOutputBuffer.hasRemaining()) {
-                        val bytesWritten = track.write(
-                            pcmOutputBuffer,
-                            pcmOutputBuffer.remaining(),
-                            AudioTrack.WRITE_BLOCKING
-                        )
-
-                        if (bytesWritten < 0) {
-                            Log.e(TAG, "Error de escritura en AudioTrack: $bytesWritten")
-                            break
-                        }
-                        if (bytesWritten == 0) break // evita spin si HAL no avanza
-                    }
-                }
-            }
+            if (decodeFEC) hbFec++ else hbDecoded++
+            writePcmBuffer()
+            logHealth("packet")
         } else {
             Log.e(TAG, "Error en decodificación Opus: código $decodedSamples")
+        }
+    }
+
+    /**
+     * Sin paquete (drop-tail del server / descarte de la cola local): Opus
+     * sintetiza un frame extrapolado que suena suave en vez de un bache.
+     */
+    private fun renderPlcFrame() {
+        pcmOutputBuffer.clear()
+        val decoded = opusDecoder?.decodePlc(pcmOutputBuffer, SAMPLES_PER_FRAME_PER_CHANNEL) ?: -1
+        if (decoded > 0) {
+            hbPlc++
+            writePcmBuffer()
+            logHealth("plc")
+        }
+    }
+
+    /**
+     * Log de salud cada HEALTH_LOG_FRAMES frames renderizados.
+     * Clave para el bug "sin sonido en segundo plano": muestra si los frames
+     * llegan (decoded/plc), si se escriben al HAL (written) y si el AudioTrack
+     * está avanzando (head) y en qué estado (playState: 1=stopped 2=paused 3=playing).
+     */
+    private var hbFramesSinceLog = 0
+    private fun logHealth(origin: String) {
+        if (++hbFramesSinceLog < HEALTH_LOG_FRAMES) return
+        hbFramesSinceLog = 0
+        val track = audioTrack
+        val head = track?.playbackHeadPosition ?: -1
+        val playState = track?.playState ?: -1
+        val underruns = track?.underrunCount ?: -1
+        Log.i(
+            TAG,
+            "hb[$origin] decoded=$hbDecoded plc=$hbPlc fec=$hbFec idle=$hbIdle written=$hbWritten " +
+                "head=$head playState=$playState underruns=$underruns " +
+                "muted=$isMuted lastRx=${SystemClock.elapsedRealtime() - lastRxAt}ms"
+        )
+    }
+
+    private fun writePcmBuffer() {
+        if (isMuted) return
+        // ponytail: write parcial exige reintentar resto; dropearlo era underrun silencioso.
+        audioTrack?.let { track ->
+            while (pcmOutputBuffer.hasRemaining()) {
+                val bytesWritten = track.write(
+                    pcmOutputBuffer,
+                    pcmOutputBuffer.remaining(),
+                    AudioTrack.WRITE_BLOCKING
+                )
+                if (bytesWritten < 0) {
+                    Log.e(TAG, "Error de escritura en AudioTrack: $bytesWritten")
+                    break
+                }
+                hbWritten += bytesWritten
+                if (bytesWritten == 0) break // evita spin si HAL no avanza
+            }
         }
     }
 

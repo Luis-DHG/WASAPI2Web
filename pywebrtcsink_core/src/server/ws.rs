@@ -10,14 +10,6 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::metrics::EngineMetrics;
 use crate::server::backpressure::{ClientAudioQueue, MAX_PENDING_AUDIO_FRAMES};
 
-/// Timestamp local HH:MM:SS para logs de consola (mismo formato que start.py).
-fn ts() -> String {
-    unsafe {
-        let st = windows::Win32::System::SystemInformation::GetLocalTime();
-        format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond)
-    }
-}
-
 pub async fn run_websocket_server(
     addr: SocketAddr,
     audio_tx: broadcast::Sender<Arc<Vec<u8>>>,
@@ -25,7 +17,7 @@ pub async fn run_websocket_server(
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(&addr).await?;
-    eprintln!("[{}] [ws] escuchando en ws://{}", ts(), addr);
+    eprintln!("[ws] escuchando en ws://{}", addr);
 
     loop {
         tokio::select! {
@@ -37,13 +29,13 @@ pub async fn run_websocket_server(
                         tokio::spawn(handle_client(stream, client_addr, client_rx, client_metrics));
                     }
                     Err(e) => {
-                        eprintln!("[{}] [ws] accept error: {:?}", ts(), e);
+                        eprintln!("[ws] accept error: {:?}", e);
                     }
                 }
             }
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
-                    eprintln!("[{}] [ws] cerrando server", ts());
+                    eprintln!("[ws] cerrando server");
                     break;
                 }
             }
@@ -61,19 +53,19 @@ async fn handle_client(
 ) {
     // Disable Nagle's algorithm for low-latency TCP delivery
     if let Err(e) = stream.set_nodelay(true) {
-        eprintln!("[{}] [ws] TCP_NODELAY falló para {}: {:?}", ts(), addr, e);
+        eprintln!("[ws] TCP_NODELAY falló para {}: {:?}", addr, e);
     }
 
     let ws_stream = match accept_async(stream).await {
         Ok(ws) => ws,
         Err(e) => {
-            eprintln!("[{}] [ws] handshake falló con {}: {:?}", ts(), addr, e);
+            eprintln!("[ws] handshake falló con {}: {:?}", addr, e);
             return;
         }
     };
 
     let active = metrics.active_clients.fetch_add(1, Ordering::Relaxed) + 1;
-    eprintln!("[{}] [ws] cliente CONECTADO: {} (activos: {})", ts(), addr, active);
+    eprintln!("[ws] cliente CONECTADO: {} (activos: {})", addr, active);
 
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
     let (client_tx, mut client_rx) = mpsc::channel::<Message>(MAX_PENDING_AUDIO_FRAMES);
@@ -83,7 +75,7 @@ async fn handle_client(
     let writer_task = tokio::spawn(async move {
         while let Some(msg) = client_rx.recv().await {
             if let Err(e) = ws_sender.send(msg).await {
-                eprintln!("[{}] [ws] write error: {:?}", ts(), e);
+                eprintln!("[ws] write error: {:?}", e);
                 break;
             }
         }
@@ -114,5 +106,5 @@ async fn handle_client(
     writer_task.abort();
     distributor_task.abort();
     let remaining = metrics.active_clients.fetch_sub(1, Ordering::Relaxed) - 1;
-    eprintln!("[{}] [ws] cliente DESCONECTADO: {} (activos: {})", ts(), addr, remaining);
+    eprintln!("[ws] cliente DESCONECTADO: {} (activos: {})", addr, remaining);
 }
