@@ -38,6 +38,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -54,6 +57,11 @@ data class ServiceUiState(
     val isMuted: Boolean = false
 )
 
+internal fun selectServerUrl(provided: String?, current: String?, saved: String?): String? =
+    provided?.trim()?.takeIf { it.isNotEmpty() }
+        ?: current?.trim()?.takeIf { it.isNotEmpty() }
+        ?: saved?.trim()?.takeIf { it.isNotEmpty() }
+
 class AudioForegroundService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -63,7 +71,9 @@ class AudioForegroundService : Service() {
     private var focusRequest: AudioFocusRequest? = null
 
     private var mediaSession: MediaSessionCompat? = null
+    @Volatile
     private var audioSinkEngine: RealtimeAudioSinkEngine? = null
+    private val engineLifecycleMutex = Mutex()
     private val mediaKeyHttp = OkHttpClient.Builder().connectTimeout(5, TimeUnit.SECONDS).build()
 
     private var reconnectJob: Job? = null
@@ -132,15 +142,26 @@ class AudioForegroundService : Service() {
         val action = intent?.action ?: ACTION_START
         when (action) {
             ACTION_START -> {
-                val url = intent?.getStringExtra(EXTRA_SERVER_URL) ?: currentServerUrl
-                if (url.isNotBlank()) {
-                    currentServerUrl = url
-                    startForegroundStreaming(url)
+                val prefs = getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+                val savedUrl = prefs.getString(PREFERENCE_SERVER_URL, null)
+                val url = selectServerUrl(
+                    intent?.getStringExtra(EXTRA_SERVER_URL),
+                    currentServerUrl,
+                    savedUrl
+                )
+                if (url == null) {
+                    Log.w(TAG, "Reinicio sin URL guardada; deteniendo servicio")
+                    stopSelf(startId)
+                    return START_NOT_STICKY
                 }
+                currentServerUrl = url
+                prefs.edit().putString(PREFERENCE_SERVER_URL, url).apply()
+                startForegroundStreaming(url)
             }
             ACTION_STOP -> {
                 stopStreaming()
                 stopSelf()
+                return START_NOT_STICKY
             }
             ACTION_TOGGLE_MUTE -> {
                 val newMuted = !_uiState.value.isMuted
@@ -161,8 +182,16 @@ class AudioForegroundService : Service() {
                     }
                 }
             }
+            ACTION_APP_FOREGROUND -> {
+                if (!_uiState.value.isPlaying) {
+                    stopSelf(startId)
+                    return START_NOT_STICKY
+                }
+                audioSinkEngine?.requestLowLatencyRetry()
+                applyVolume("app_foreground")
+            }
         }
-        return START_STICKY
+        return if (_uiState.value.isPlaying) START_STICKY else START_NOT_STICKY
     }
 
     private fun startForegroundStreaming(serverUrl: String) {
@@ -187,22 +216,26 @@ class AudioForegroundService : Service() {
 
     private fun connectEngine(serverUrl: String) {
         reconnectJob?.cancel()
-        stopEngine()
+        serviceScope.launch(Dispatchers.IO) {
+            engineLifecycleMutex.withLock {
+                stopEngineLocked()
+                if (!_uiState.value.isPlaying) return@withLock
 
-        val engine = RealtimeAudioSinkEngine(this, serverUrl).apply {
-            onStateChange = { engineState ->
-                handleEngineStateChange(engineState)
+                val engine = RealtimeAudioSinkEngine(this@AudioForegroundService, serverUrl)
+                engine.onStateChange = { engineState ->
+                    handleEngineStateChange(engine, engineState)
+                }
+                audioSinkEngine = engine
+                engine.start()
+                applyVolume("engine_start")
             }
         }
-
-        audioSinkEngine = engine
-        applyVolume("engine_start")
-        engine.start()
     }
 
-    private fun handleEngineStateChange(engineState: EngineState) {
-        Log.i(TAG, "Engine state: $engineState")
+    private fun handleEngineStateChange(source: RealtimeAudioSinkEngine, engineState: EngineState) {
         serviceScope.launch {
+            if (audioSinkEngine !== source) return@launch
+            Log.i(TAG, "Engine state: $engineState")
             val connState = when (engineState) {
                 EngineState.CONNECTED -> {
                     reconnectAttempts = 0
@@ -305,13 +338,16 @@ class AudioForegroundService : Service() {
 
     // ponytail: engine.stop() hace join+release (bloquea); fuera del Main o es jank/ANR.
     private fun stopEngine() {
-        val engine = audioSinkEngine
-        audioSinkEngine = null
-        if (engine != null) {
-            serviceScope.launch(Dispatchers.IO) {
-                engine.stop()
-            }
+        serviceScope.launch(Dispatchers.IO) {
+            engineLifecycleMutex.withLock { stopEngineLocked() }
         }
+    }
+
+    private fun stopEngineLocked() {
+        val engine = audioSinkEngine ?: return
+        audioSinkEngine = null
+        engine.onStateChange = null
+        engine.stop()
     }
 
     // ponytail: un POST; sin clase aparte. OkHttp ya vive en el classpath por el engine.
@@ -452,6 +488,11 @@ class AudioForegroundService : Service() {
     override fun onDestroy() {
         runCatching { unregisterReceiver(screenReceiver) }
         stopStreaming()
+        runBlocking {
+            withContext(Dispatchers.IO) {
+                engineLifecycleMutex.withLock { stopEngineLocked() }
+            }
+        }
         mediaSession?.release()
         mediaSession = null
         serviceScope.cancel()
@@ -469,8 +510,11 @@ class AudioForegroundService : Service() {
         const val ACTION_STOP = "com.wasapi.sink.action.STOP"
         const val ACTION_TOGGLE_MUTE = "com.wasapi.sink.action.TOGGLE_MUTE"
         const val ACTION_SEND_MEDIA_KEY = "com.wasapi.sink.action.SEND_MEDIA_KEY"
+        const val ACTION_APP_FOREGROUND = "com.wasapi.sink.action.APP_FOREGROUND"
 
         const val EXTRA_SERVER_URL = "extra_server_url"
+        const val PREFERENCES_NAME = "wasapi_sink_prefs"
+        const val PREFERENCE_SERVER_URL = "server_url"
 
         private val _uiState = MutableStateFlow(ServiceUiState())
         val uiState: StateFlow<ServiceUiState> = _uiState.asStateFlow()
@@ -504,6 +548,14 @@ class AudioForegroundService : Service() {
         fun sendMediaKey(context: Context) {
             val intent = Intent(context, AudioForegroundService::class.java).apply {
                 action = ACTION_SEND_MEDIA_KEY
+            }
+            context.startService(intent)
+        }
+
+        fun notifyAppForeground(context: Context) {
+            if (!_uiState.value.isPlaying) return
+            val intent = Intent(context, AudioForegroundService::class.java).apply {
+                action = ACTION_APP_FOREGROUND
             }
             context.startService(intent)
         }

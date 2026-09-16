@@ -342,7 +342,6 @@ impl PyWasapiSinkEngine {
             pcm_silent_injected: m.pcm_silent_injected.load(Ordering::Relaxed),
             frames_encoded: m.frames_encoded.load(Ordering::Relaxed),
             bytes_broadcasted: m.bytes_broadcasted.load(Ordering::Relaxed),
-            frames_dropped_tcp: m.frames_dropped_tcp.load(Ordering::Relaxed),
             frames_dropped_backlog: m.frames_dropped_backlog.load(Ordering::Relaxed),
             frames_dropped_ring: m.frames_dropped_ring.load(Ordering::Relaxed),
             active_clients: m.active_clients.load(Ordering::Relaxed),
@@ -368,8 +367,6 @@ pub struct PyMetrics {
     pub frames_encoded: u64,
     #[pyo3(get)]
     pub bytes_broadcasted: u64,
-    #[pyo3(get)]
-    pub frames_dropped_tcp: u64,
     #[pyo3(get)]
     pub frames_dropped_backlog: u64,
     #[pyo3(get)]

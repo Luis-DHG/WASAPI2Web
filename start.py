@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import ctypes
 import http.server
-import json
 import logging
 import os
 import socket
@@ -65,18 +64,6 @@ def get_local_ip(default: str = "127.0.0.1") -> str:
 class Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # silencio total: solo WS connect/disconnect (Rust) y media-key se loguean
-
-    def do_GET(self):
-        # Anuncia el puerto WS: unica fuente de verdad para todos los clientes.
-        if self.path == "/api/config":
-            body = json.dumps({"ws_port": WS_PORT}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        super().do_GET()
 
     def do_POST(self):
         try:

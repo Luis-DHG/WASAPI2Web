@@ -35,7 +35,7 @@ def main():
                 f"Silencio: {m.pcm_silent_injected:6d} | "
                 f"Opus Encoded: {m.frames_encoded:6d} | "
                 f"Enviado: {m.bytes_broadcasted / 1024:8.1f} KB | "
-                f"TCP Drops: {m.frames_dropped_tcp:4d} | "
+                f"Backlog Drops: {m.frames_dropped_backlog:4d} | "
                 f"Ring Drops: {m.frames_dropped_ring:4d} | "
                 f"Clientes: {m.active_clients:2d}",
                 end="",

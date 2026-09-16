@@ -21,6 +21,7 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.ArrayDeque
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -33,6 +34,39 @@ enum class EngineState {
     CONNECTED,
     RECONNECTING,
     ERROR
+}
+
+internal fun wsUrlFor(serverUrl: String): String {
+    var base = serverUrl.trim().trimEnd('/')
+    if (!base.startsWith("http://") && !base.startsWith("https://")) base = "http://$base"
+    val host = base.removePrefix("http://").removePrefix("https://")
+        .substringBefore('/').substringBefore(':')
+    return "ws://$host:8090"
+}
+
+internal class TrackFallbackTracker(
+    private val threshold: Int = 3,
+    private val windowMs: Long = 60_000L
+) {
+    private val stalls = ArrayDeque<Long>(threshold)
+
+    @Volatile
+    var fallbackActive = false
+        private set
+
+    fun recordStall(nowMs: Long): Boolean {
+        if (fallbackActive) return true
+        val windowStart = nowMs - windowMs
+        while (stalls.peekFirst()?.let { it < windowStart } == true) stalls.removeFirst()
+        stalls.addLast(nowMs)
+        if (stalls.size >= threshold) fallbackActive = true
+        return fallbackActive
+    }
+
+    fun reset() {
+        stalls.clear()
+        fallbackActive = false
+    }
 }
 
 /**
@@ -69,6 +103,9 @@ class RealtimeAudioSinkEngine(
         // Watchdog AudioTrack: head sin avanzar >1s mientras escribimos = track
         // zombie (bug "sin sonido en segundo plano") → recrear SOLO el track.
         private const val TRACK_STALL_MS = 1000L
+
+        internal fun isPacketLengthValid(length: Int): Boolean =
+            length in HEADER_SIZE_BYTES..MAX_PACKET_CAPACITY
     }
 
     // Contadores de salud del pipeline (solo diagnóstico)
@@ -82,6 +119,9 @@ class RealtimeAudioSinkEngine(
     private var lastHeadPos = -1
     private var lastHeadAdvanceMs = 0L
     private var trackRecreations = 0
+    private var usingLowLatencyTrack = true
+    private val trackFallback = TrackFallbackTracker()
+    private val lowLatencyRetryRequested = AtomicBoolean(false)
 
     // Frame de silencio pre-asignado para alimentar el HAL cuando la cola esta
     // vacia: nunca dejar al AudioTrack sin datos (underrun = clic + track zombie).
@@ -90,6 +130,7 @@ class RealtimeAudioSinkEngine(
     var onStateChange: ((EngineState) -> Unit)? = null
 
     private val isRunning = AtomicBoolean(false)
+    @Volatile
     private var isMuted = false
     private var audioThread: Thread? = null
 
@@ -136,7 +177,7 @@ class RealtimeAudioSinkEngine(
     /**
      * Inicializa y configura el AudioTrack con los flags de menor latencia posibles.
      */
-    private fun initAudioTrack(): AudioTrack {
+    private fun initAudioTrack(useLowLatency: Boolean): AudioTrack {
         val minBufferSize = AudioTrack.getMinBufferSize(
             SAMPLE_RATE,
             AudioFormat.CHANNEL_OUT_STEREO,
@@ -165,18 +206,23 @@ class RealtimeAudioSinkEngine(
             .setBufferSizeInBytes(minBufferSize.coerceAtLeast(PCM_FRAME_SIZE_BYTES * 4))
             .setTransferMode(AudioTrack.MODE_STREAM)
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (useLowLatency && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             trackBuilder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
         }
 
         val track = trackBuilder.build()
 
-        // Reducir el buffer activo en el HAL a 2 frames (40ms) para minimizar latencia
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        // El fallback conserva el buffer normal: forzar 40 ms vuelve a activar
+        // el mismo modo que MIUI mata en background tras silencio prolongado.
+        val activeFrames = if (useLowLatency && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val targetFrames = SAMPLES_PER_FRAME_PER_CHANNEL * 2
-            val setFrames = track.setBufferSizeInFrames(targetFrames)
-            Log.i(TAG, "AudioTrack configurado: buffer activo fijado en $setFrames frames (~${setFrames * 1000 / SAMPLE_RATE}ms)")
-        }
+            track.setBufferSizeInFrames(targetFrames)
+        } else track.bufferSizeInFrames
+        Log.i(
+            TAG,
+            "AudioTrack modo=${if (useLowLatency) "fast" else "fallback"}: " +
+                "$activeFrames frames (~${activeFrames * 1000 / SAMPLE_RATE}ms)"
+        )
 
         return track
     }
@@ -195,7 +241,13 @@ class RealtimeAudioSinkEngine(
 
         try {
             opusDecoder = OpusDecoderWrapper(SAMPLE_RATE, CHANNELS)
-            audioTrack = initAudioTrack().apply { play() }
+            trackFallback.reset()
+            lowLatencyRetryRequested.set(false)
+            usingLowLatencyTrack = true
+            audioTrack = initAudioTrack(useLowLatency = true).apply {
+                setVolume(if (isMuted) 0f else 1f)
+                play()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Fallo al inicializar recursos de audio: ${e.message}", e)
             onStateChange?.invoke(EngineState.ERROR)
@@ -214,38 +266,12 @@ class RealtimeAudioSinkEngine(
         connectWebSocket()
     }
 
-    /**
-     * Resuelve el puerto WS preguntando a /api/config del server (única fuente
-     * de verdad; fallback 8090 si el GET falla). Corre en hilo propio para no
-     * bloquear al caller.
-     */
-    private fun resolveWsUrl(serverUrl: String, onResolved: (String) -> Unit) {
-        Thread({
-            var base = serverUrl.trim().trimEnd('/')
-            if (!base.startsWith("http://") && !base.startsWith("https://")) base = "http://$base"
-            val wsPort = try {
-                val req = Request.Builder().url("$base/api/config").build()
-                httpClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) throw java.io.IOException("HTTP ${resp.code}")
-                    org.json.JSONObject(resp.body?.string() ?: "").optInt("ws_port", 8090)
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "No pude leer /api/config (${e.message}); fallback ws_port=8090")
-                8090
-            }
-            // ponytail: del base solo importa el host; el WS cuelga de la raíz.
-            val host = base.removePrefix("http://").removePrefix("https://")
-                .substringBefore('/').substringBefore(':')
-            onResolved("ws://$host:$wsPort")
-        }, "ws-url-resolver").start()
-    }
-
     private fun connectWebSocket() {
-        resolveWsUrl(serverWsUrl) { wsUrl ->
-            if (!isRunning.get()) return@resolveWsUrl
-            Log.i(TAG, "Conectando WebSocket a: $wsUrl")
+        if (!isRunning.get()) return
+        val wsUrl = wsUrlFor(serverWsUrl)
+        Log.i(TAG, "Conectando WebSocket a: $wsUrl")
 
-            val request = Request.Builder().url(wsUrl).build()
+        val request = Request.Builder().url(wsUrl).build()
         webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "WebSocket conectado con el backend")
@@ -256,9 +282,12 @@ class RealtimeAudioSinkEngine(
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 if (!isRunning.get()) return
-                lastRxAt = SystemClock.elapsedRealtime()
                 val length = bytes.size
-                if (length < HEADER_SIZE_BYTES) return
+                if (!isPacketLengthValid(length)) {
+                    Log.w(TAG, "Paquete WS inválido: $length bytes (máximo $MAX_PACKET_CAPACITY)")
+                    return
+                }
+                lastRxAt = SystemClock.elapsedRealtime()
 
                 // Obtener buffer del pool (Zero allocation)
                 val packet = packetPool.poll() ?: run {
@@ -304,8 +333,7 @@ class RealtimeAudioSinkEngine(
                     onStateChange?.invoke(EngineState.DISCONNECTED)
                 }
             }
-            })
-        }
+        })
     }
 
     /**
@@ -320,6 +348,7 @@ class RealtimeAudioSinkEngine(
 
         while (isRunning.get()) {
             try {
+                retryLowLatencyIfRequested()
                 // La politica (catch-up, gaps, PLC/FEC) vive en PlayoutBuffer;
                 // este loop solo ejecuta la decision.
                 when (val decision = playout.poll(SystemClock.elapsedRealtime())) {
@@ -424,6 +453,7 @@ class RealtimeAudioSinkEngine(
             TAG,
             "hb[$origin] decoded=$hbDecoded plc=$hbPlc fec=$hbFec idle=$hbIdle written=$hbWritten " +
                 "head=$head playState=$playState underruns=$underruns trackRec=$trackRecreations " +
+                "trackMode=${if (usingLowLatencyTrack) "fast" else "fallback"} " +
                 "depth=${playout.depth} drained=${playout.drainedForCatchUp} " +
                 "muted=$isMuted lastRx=${SystemClock.elapsedRealtime() - lastRxAt}ms"
         )
@@ -449,6 +479,39 @@ class RealtimeAudioSinkEngine(
         checkTrackWatchdog()
     }
 
+    fun requestLowLatencyRetry() {
+        if (trackFallback.fallbackActive) lowLatencyRetryRequested.set(true)
+    }
+
+    private fun retryLowLatencyIfRequested() {
+        if (!lowLatencyRetryRequested.getAndSet(false) || !trackFallback.fallbackActive) return
+        if (recreateAudioTrack(useLowLatency = true, reason = "app_foreground")) {
+            trackFallback.reset()
+        }
+    }
+
+    private fun recreateAudioTrack(useLowLatency: Boolean, reason: String): Boolean {
+        val oldTrack = audioTrack
+        runCatching { oldTrack?.pause() }
+        runCatching { oldTrack?.flush() }
+        runCatching { oldTrack?.stop() }
+        runCatching { oldTrack?.release() }
+
+        audioTrack = try {
+            initAudioTrack(useLowLatency).apply {
+                setVolume(if (isMuted) 0f else 1f)
+                play()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Fallo al recrear AudioTrack ($reason): ${e.message}", e)
+            null
+        }
+        usingLowLatencyTrack = useLowLatency
+        lastHeadPos = -1
+        lastHeadAdvanceMs = SystemClock.elapsedRealtime()
+        return audioTrack != null
+    }
+
     /**
      * Si el track dice "playing" pero el cabezal no avanza mientras escribimos,
      * el HAL quedo zombie (bug conocido: segundo plano + silencio largo).
@@ -470,19 +533,13 @@ class RealtimeAudioSinkEngine(
         if (now - lastHeadAdvanceMs < TRACK_STALL_MS) return
 
         trackRecreations++
-        Log.w(TAG, "AudioTrack zombie (head=$head sin avanzar ${now - lastHeadAdvanceMs}ms). Recreando track (#$trackRecreations)")
-        runCatching { track.pause() }
-        runCatching { track.flush() }
-        runCatching { track.stop() }
-        runCatching { track.release() }
-        audioTrack = try {
-            initAudioTrack().apply { setVolume(if (isMuted) 0f else 1f); play() }
-        } catch (e: Exception) {
-            Log.e(TAG, "Fallo al recrear AudioTrack: ${e.message}", e)
-            null
-        }
-        lastHeadPos = -1
-        lastHeadAdvanceMs = now
+        val fallback = trackFallback.recordStall(now)
+        Log.w(
+            TAG,
+            "AudioTrack zombie (head=$head sin avanzar ${now - lastHeadAdvanceMs}ms). " +
+                "Recreando track (#$trackRecreations, modo=${if (fallback) "fallback" else "fast"})"
+        )
+        recreateAudioTrack(useLowLatency = !fallback, reason = "watchdog")
     }
 
     fun stop() {
@@ -514,6 +571,9 @@ class RealtimeAudioSinkEngine(
 
         opusDecoder?.release()
         opusDecoder = null
+
+        lowLatencyRetryRequested.set(false)
+        trackFallback.reset()
 
         playout.reset()
         packetPool.clear()

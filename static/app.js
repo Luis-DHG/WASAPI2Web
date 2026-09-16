@@ -26,10 +26,6 @@
     return;
   }
 
-  var wsPort = 8090;               // default; el server lo confirma via /api/config
-  fetch("/api/config").then(function (r) { return r.json(); }).then(function (c) {
-    if (c && c.ws_port) wsPort = c.ws_port;
-  }).catch(function () { });
   var TARGET_BUF_S = 0.06;         // 60ms de jitter buffer (3 frames de 20ms)
   var MAX_AHEAD_S = 0.5;           // techo de scheduling (vuelta de background)
   var RECONNECT_BASE_MS = 500, RECONNECT_MAX_MS = 5000;
@@ -144,7 +140,7 @@
   }
 
   function connect() {
-    ws = new WebSocket("ws://" + location.hostname + ":" + wsPort);
+    ws = new WebSocket("ws://" + location.hostname + ":8090");
     ws.binaryType = "arraybuffer";
     setBadge("conectando...", "recon");
 

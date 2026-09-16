@@ -12,7 +12,7 @@ android {
         minSdk = 24
         targetSdk = 34
         versionCode = 1
-        versionName = "2.1"
+        versionName = "2.2"
 
         // ponytail: ABI filter — solo arm64-v8a (99% dispositivos 2017+)
         // elimina armeabi-v7a/x86/x86_64 → APK de ~57MB a ~22MB

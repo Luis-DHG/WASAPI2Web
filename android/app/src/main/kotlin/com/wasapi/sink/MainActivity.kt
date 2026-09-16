@@ -20,13 +20,13 @@ import com.wasapi.sink.ui.theme.PyWebRTCSinkTheme
 class MainActivity : ComponentActivity() {
 
     private val prefs: SharedPreferences by lazy {
-        getSharedPreferences("wasapi_sink_prefs", Context.MODE_PRIVATE)
+        getSharedPreferences(AudioForegroundService.PREFERENCES_NAME, Context.MODE_PRIVATE)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val savedUrl = prefs.getString("server_url", null)
+        val savedUrl = prefs.getString(AudioForegroundService.PREFERENCE_SERVER_URL, null)
 
         setContent {
             PyWebRTCSinkTheme {
@@ -40,7 +40,7 @@ class MainActivity : ComponentActivity() {
                     uiState = uiState,
                     initialServerUrl = savedUrl,
                     onServerUrlChanged = { newUrl ->
-                        prefs.edit().putString("server_url", newUrl).apply()
+                        prefs.edit().putString(AudioForegroundService.PREFERENCE_SERVER_URL, newUrl).apply()
                     },
                     onRequestNotificationPermission = {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -56,5 +56,10 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        AudioForegroundService.notifyAppForeground(this)
     }
 }
