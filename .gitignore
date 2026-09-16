@@ -16,7 +16,8 @@ android/local.properties
 .vscode/
 .idea/
 .DS_Store
-context.md
+*.md
+!README.md
 
 # binarios / claves locales
 *.apk
