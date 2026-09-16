@@ -12,7 +12,7 @@ def main():
     
     host = "0.0.0.0"
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8090
-    bitrate = 96000
+    bitrate = 128000
 
     print(f"Starting native engine on ws://{host}:{port} @ {bitrate/1000:.0f} kbps...")
     try:

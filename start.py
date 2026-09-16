@@ -28,7 +28,7 @@ log = logging.getLogger("pywebrtcsink")
 HTTP_PORT = 8080
 WS_PORT = 8090
 WS_HOST = "0.0.0.0"
-BITRATE = 96000
+BITRATE = 128000  # FEC tiene margen sin exprimir la trama
 
 
 def get_local_ip(default: str = "127.0.0.1") -> str:

@@ -10,6 +10,9 @@ import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import com.wasapi.sink.audio.codec.OpusDecoderWrapper
+import com.wasapi.sink.audio.playout.AudioPacket
+import com.wasapi.sink.audio.playout.PlayoutBuffer
+import com.wasapi.sink.audio.playout.PlayoutDecision
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -55,18 +58,17 @@ class RealtimeAudioSinkEngine(
         const val MAX_PACKET_CAPACITY = HEADER_SIZE_BYTES + MAX_OPUS_PAYLOAD_SIZE
 
         private const val POOL_CAPACITY = 32
-        private const val JITTER_QUEUE_CAPACITY = 16
 
-        // Umbral de ráfagas TCP: Si hay más de 3 frames (60ms) acumulados, se acelera el drenaje
-        private const val MAX_JITTER_THRESHOLD_FRAMES = 3
-
-        // ponytail: cap de relleno PLC — >3 frames sintetizados seguidos suena
-        // robótico; hueco más grande = salto limpio, no relleno.
-        private const val MAX_PLC_FRAMES = 3
+        // La política de jitter/catch-up/PLC/FEC vive en PlayoutBuffer
+        // (audio/playout/PlayoutBuffer.kt); aqui solo queda transporte.
 
         // Diagnóstico background-silence: cada 200 frames (~4s) log de salud
         // del pipeline audio (decode → write → HAL).
         private const val HEALTH_LOG_FRAMES = 200
+
+        // Watchdog AudioTrack: head sin avanzar >1s mientras escribimos = track
+        // zombie (bug "sin sonido en segundo plano") → recrear SOLO el track.
+        private const val TRACK_STALL_MS = 1000L
     }
 
     // Contadores de salud del pipeline (solo diagnóstico)
@@ -76,11 +78,14 @@ class RealtimeAudioSinkEngine(
     private var hbFec = 0L
     private var hbIdle = 0L
 
-    data class AudioPacket(
-        val buffer: ByteBuffer,
-        var sequenceNumber: Long = 0L,
-        var payloadSize: Int = 0
-    )
+    // Estado del watchdog del track
+    private var lastHeadPos = -1
+    private var lastHeadAdvanceMs = 0L
+    private var trackRecreations = 0
+
+    // Frame de silencio pre-asignado para alimentar el HAL cuando la cola esta
+    // vacia: nunca dejar al AudioTrack sin datos (underrun = clic + track zombie).
+    private val silenceFrame = ByteBuffer.allocateDirect(PCM_FRAME_SIZE_BYTES).order(ByteOrder.LITTLE_ENDIAN)
 
     var onStateChange: ((EngineState) -> Unit)? = null
 
@@ -97,7 +102,11 @@ class RealtimeAudioSinkEngine(
 
     // Estructuras Lock-Free / Concurrentes pre-asignadas
     private val packetPool = ArrayBlockingQueue<AudioPacket>(POOL_CAPACITY)
-    private val jitterQueue = ArrayBlockingQueue<AudioPacket>(JITTER_QUEUE_CAPACITY)
+    // ponytail: el buffer es @Synchronized por dentro; los descartes vuelven
+    // al pool via onDiscard asi el hilo de audio nunca toca el pool directo.
+    private val playout = PlayoutBuffer().apply {
+        onDiscard = { packetPool.offer(it) }
+    }
 
     private var audioTrack: AudioTrack? = null
     private var opusDecoder: OpusDecoderWrapper? = null
@@ -113,8 +122,7 @@ class RealtimeAudioSinkEngine(
     // Buffers de decodificación directos pre-asignados
     private val pcmOutputBuffer = ByteBuffer.allocateDirect(PCM_FRAME_SIZE_BYTES).order(ByteOrder.LITTLE_ENDIAN)
 
-    // Métricas y seguimiento de secuencia
-    private var lastSequenceNumber = -1L
+    // Métricas (el seguimiento de seq vive en PlayoutBuffer)
     private var droppedFramesCount = 0L
 
     init {
@@ -196,6 +204,8 @@ class RealtimeAudioSinkEngine(
         }
 
         // Iniciar el hilo de renderizado con prioridad de audio en tiempo real
+        lastHeadPos = -1
+        lastHeadAdvanceMs = 0L
         audioThread = Thread({ audioPlaybackLoop() }, "RealtimeAudioRenderer").apply {
             priority = Thread.MAX_PRIORITY
             start()
@@ -239,7 +249,7 @@ class RealtimeAudioSinkEngine(
         webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "WebSocket conectado con el backend")
-                lastSequenceNumber = -1L
+                playout.reset()
                 lastRxAt = SystemClock.elapsedRealtime()
                 onStateChange?.invoke(EngineState.CONNECTED)
             }
@@ -274,15 +284,10 @@ class RealtimeAudioSinkEngine(
                 packet.sequenceNumber = seq
                 packet.payloadSize = payloadSize
 
-                // Insertar en la cola del Jitter Buffer
-                if (!jitterQueue.offer(packet)) {
-                    // Cola llena: descartar el frame más viejo (evita acumulación de latencia)
-                    val dropped = jitterQueue.poll()
-                    if (dropped != null) {
-                        packetPool.offer(dropped)
-                        droppedFramesCount++
-                    }
-                    jitterQueue.offer(packet)
+                // La política de descarte/cola vive en PlayoutBuffer.
+                playout.offer(packet)?.let { evicted ->
+                    packetPool.offer(evicted)
+                    droppedFramesCount++
                 }
             }
 
@@ -315,48 +320,42 @@ class RealtimeAudioSinkEngine(
 
         while (isRunning.get()) {
             try {
-                // Catch-up de ráfagas TCP: descartar de a 1 por tick. El FEC del
-                // siguiente frame tapa el hueco (drenar de golpe creaba huecos
-                // multi-frame que el FEC no alcanza a cubrir → chasquido).
-                if (jitterQueue.size > MAX_JITTER_THRESHOLD_FRAMES) {
-                    jitterQueue.poll()?.let {
-                        packetPool.offer(it)
-                        droppedFramesCount++
+                // La politica (catch-up, gaps, PLC/FEC) vive en PlayoutBuffer;
+                // este loop solo ejecuta la decision.
+                when (val decision = playout.poll(SystemClock.elapsedRealtime())) {
+                    is PlayoutDecision.Play -> {
+                        try {
+                            renderPacket(decision.packet, decodeFEC = false)
+                        } finally {
+                            packetPool.offer(decision.packet)
+                        }
+                    }
+                    is PlayoutDecision.Gap -> {
+                        Log.w(TAG, "Pérdida: PLC x${decision.plcFrames} + FEC (Seq: ${decision.packet.sequenceNumber})")
+                        try {
+                            repeat(decision.plcFrames) { renderPlcFrame() }
+                            renderPacket(decision.packet, decodeFEC = true)  // recupera el inmediato anterior
+                            renderPacket(decision.packet, decodeFEC = false)
+                        } finally {
+                            packetPool.offer(decision.packet)
+                        }
+                    }
+                    PlayoutDecision.Idle -> {
+                        hbIdle++
+                        // Cola vacia: escribir silencio igual para que el HAL no se seque.
+                        writeRaw(silenceFrame)
+                        logHealth("idle")
+                        val lastRx = lastRxAt
+                        if (lastRx > 0L && SystemClock.elapsedRealtime() - lastRx > 4000L) {
+                            Log.w(TAG, "Sin frames por >4s con socket abierto. Forzando reconexión.")
+                            lastRxAt = 0L
+                            webSocket?.cancel()
+                        }
+                        // ponytail: la cola no es bloqueante; el tick de 20ms
+                        // mantiene la cadencia sin consumir CPU.
+                        Thread.sleep(20)
                     }
                 }
-
-                // Esperar el siguiente paquete (máximo 25ms para evitar bloquear indefinidamente)
-                val packet = jitterQueue.poll(25, TimeUnit.MILLISECONDS)
-                if (packet == null) {
-                    hbIdle++
-                    logHealth("idle")
-                    val lastRx = lastRxAt
-                    if (lastRx > 0L && SystemClock.elapsedRealtime() - lastRx > 4000L) {
-                        Log.w(TAG, "Sin frames por >4s con socket abierto. Forzando reconexión.")
-                        lastRxAt = 0L
-                        webSocket?.cancel()
-                    }
-                    continue
-                }
-
-                // Hueco de secuencia: el FEC inband del paquete actual recupera el
-                // frame inmediatamente anterior; los frames perdidos previos se tapan
-                // con PLC (Opus sintetiza relleno suavizado en vez de bache de silencio).
-                if (lastSequenceNumber != -1L && packet.sequenceNumber > lastSequenceNumber + 1) {
-                    val lostCount = packet.sequenceNumber - (lastSequenceNumber + 1)
-                    Log.w(TAG, "Pérdida detectada: $lostCount paquetes omitidos (Seq: ${packet.sequenceNumber})")
-                    repeat((lostCount - 1).toInt().coerceAtMost(MAX_PLC_FRAMES)) {
-                        renderPlcFrame()
-                    }
-                    renderPacket(packet, decodeFEC = true)
-                }
-                lastSequenceNumber = packet.sequenceNumber
-
-                renderPacket(packet, decodeFEC = false)
-
-                // Devolver el paquete al pool inmediatamente
-                packetPool.offer(packet)
-
             } catch (e: InterruptedException) {
                 break
             } catch (e: Exception) {
@@ -424,21 +423,21 @@ class RealtimeAudioSinkEngine(
         Log.i(
             TAG,
             "hb[$origin] decoded=$hbDecoded plc=$hbPlc fec=$hbFec idle=$hbIdle written=$hbWritten " +
-                "head=$head playState=$playState underruns=$underruns " +
+                "head=$head playState=$playState underruns=$underruns trackRec=$trackRecreations " +
+                "depth=${playout.depth} drained=${playout.drainedForCatchUp} " +
                 "muted=$isMuted lastRx=${SystemClock.elapsedRealtime() - lastRxAt}ms"
         )
     }
 
     private fun writePcmBuffer() {
         if (isMuted) return
-        // ponytail: write parcial exige reintentar resto; dropearlo era underrun silencioso.
+        writeRaw(pcmOutputBuffer)
+    }
+
+    private fun writeRaw(buf: ByteBuffer) {
         audioTrack?.let { track ->
-            while (pcmOutputBuffer.hasRemaining()) {
-                val bytesWritten = track.write(
-                    pcmOutputBuffer,
-                    pcmOutputBuffer.remaining(),
-                    AudioTrack.WRITE_BLOCKING
-                )
+            while (buf.hasRemaining()) {
+                val bytesWritten = track.write(buf, buf.remaining(), AudioTrack.WRITE_BLOCKING)
                 if (bytesWritten < 0) {
                     Log.e(TAG, "Error de escritura en AudioTrack: $bytesWritten")
                     break
@@ -447,6 +446,43 @@ class RealtimeAudioSinkEngine(
                 if (bytesWritten == 0) break // evita spin si HAL no avanza
             }
         }
+        checkTrackWatchdog()
+    }
+
+    /**
+     * Si el track dice "playing" pero el cabezal no avanza mientras escribimos,
+     * el HAL quedo zombie (bug conocido: segundo plano + silencio largo).
+     * Self-heal: recrear SOLO el AudioTrack; decoder y WS sobreviven.
+     */
+    private fun checkTrackWatchdog() {
+        val track = audioTrack ?: return
+        val head = track.playbackHeadPosition
+        val now = SystemClock.elapsedRealtime()
+        if (head != lastHeadPos) {
+            lastHeadPos = head
+            lastHeadAdvanceMs = now
+            return
+        }
+        if (lastHeadAdvanceMs == 0L) {
+            lastHeadAdvanceMs = now
+            return
+        }
+        if (now - lastHeadAdvanceMs < TRACK_STALL_MS) return
+
+        trackRecreations++
+        Log.w(TAG, "AudioTrack zombie (head=$head sin avanzar ${now - lastHeadAdvanceMs}ms). Recreando track (#$trackRecreations)")
+        runCatching { track.pause() }
+        runCatching { track.flush() }
+        runCatching { track.stop() }
+        runCatching { track.release() }
+        audioTrack = try {
+            initAudioTrack().apply { setVolume(if (isMuted) 0f else 1f); play() }
+        } catch (e: Exception) {
+            Log.e(TAG, "Fallo al recrear AudioTrack: ${e.message}", e)
+            null
+        }
+        lastHeadPos = -1
+        lastHeadAdvanceMs = now
     }
 
     fun stop() {
@@ -479,7 +515,7 @@ class RealtimeAudioSinkEngine(
         opusDecoder?.release()
         opusDecoder = null
 
-        jitterQueue.clear()
+        playout.reset()
         packetPool.clear()
     }
 }

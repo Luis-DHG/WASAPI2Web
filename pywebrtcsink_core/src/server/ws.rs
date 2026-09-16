@@ -3,12 +3,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio_tungstenite::accept_async;
-use tokio_tungstenite::tungstenite::Message;
 
 use crate::metrics::EngineMetrics;
-use crate::server::backpressure::{ClientAudioQueue, MAX_PENDING_AUDIO_FRAMES};
+use crate::server::backpressure::ClientDrainPolicy;
 
 pub async fn run_websocket_server(
     addr: SocketAddr,
@@ -68,35 +67,26 @@ async fn handle_client(
     eprintln!("[ws] cliente CONECTADO: {} (activos: {})", addr, active);
 
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-    let (client_tx, mut client_rx) = mpsc::channel::<Message>(MAX_PENDING_AUDIO_FRAMES);
-    let mut queue = ClientAudioQueue::new(client_tx, metrics.clone());
 
-    // Task 1: Write messages to WebSocket sink over TCP
+    // Un solo writer que consume el broadcast directamente: la lentitud del
+    // socket frena el recv, y la policy descarta los frames MAS VIEJOS cuando
+    // el backlog supera el cap (drop-oldest, no drop-tail).
+    let writer_metrics = metrics.clone();
+    let mut policy = ClientDrainPolicy::new(audio_rx, writer_metrics.clone());
     let writer_task = tokio::spawn(async move {
-        while let Some(msg) = client_rx.recv().await {
-            if let Err(e) = ws_sender.send(msg).await {
+        while let Some(frame) = policy.next_frame().await {
+            if let Err(e) = ws_sender.send(ClientDrainPolicy::pack(&frame)).await {
                 eprintln!("[ws] write error: {:?}", e);
                 break;
             }
+            writer_metrics.bytes_broadcasted.fetch_add(frame.len() as u64, Ordering::Relaxed);
         }
     });
 
-    // Task 2: Distribute broadcast frames with drop-tail backpressure
-    let distributor_task = tokio::spawn(async move {
-        loop {
-            match audio_rx.recv().await {
-                Ok(frame) => queue.try_push_frame(frame),
-                // ponytail: distributor lento salta hueco y sigue; sin esto Lagged cerraba el stream en silencio.
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
-
-    // Task 3: Drain inbound messages and keep connection alive
+    // Drain inbound messages and keep connection alive
     while let Some(msg_result) = ws_receiver.next().await {
         match msg_result {
-            Ok(Message::Close(_)) => break,
+            Ok(msg) if msg.is_close() => break,
             Err(_) => break,
             // ponytail: pings/pongs los responde tungstenite solo
             _ => {}
@@ -104,7 +94,6 @@ async fn handle_client(
     }
 
     writer_task.abort();
-    distributor_task.abort();
     let remaining = metrics.active_clients.fetch_sub(1, Ordering::Relaxed) - 1;
     eprintln!("[ws] cliente DESCONECTADO: {} (activos: {})", addr, remaining);
 }
