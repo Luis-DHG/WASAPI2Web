@@ -1,6 +1,26 @@
-src/__pycache__/
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
 
+# Rust / maturin
+pywebrtcsink_core/target/
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+# Entorno
 .vscode/
+.idea/
 .DS_Store
-/android
-context.md
+*.md
+!README.md
+
+# binarios / claves locales
+*.apk
+*.aab
+*.keystore
+*.jks

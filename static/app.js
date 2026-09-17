@@ -1,339 +1,232 @@
-/* app.js - PyWebRTCSink cliente WebRTC.
+/* app.js — cliente WS+Opus/WASM para el motor Rust (pywebrtcsink-core).
  *
- * Arquitectura:
- *   1. RTCPeerConnection ofrece SDP via Signalling.postOffer al backend.
- *   2. <audio autoplay>.srcObject = event.streams[0] -> decode Opus HW.
- *   3. navigator.mediaSession registra Foreground Service de media en
- *      Android Chrome para prevenir Doze Mode al apagar pantalla.
- *   4. Listener "pause" en <audio> recupera Audio Focus si el SO pausa.
- *   5. Reconexion automatica si ICE entra en "failed".
- *   6. RtpSilenceWatchdog (./watchdog.js) fuerza reconnect ante silencio RTP.
- *
- * Sin jitter buffer manual: el stack WebRTC del navegador gestiona
- * jitter, NACK, PLI y reordenado de paquetes.
+ * Flujo:
+ *   1. WS a ws://<host>:8090 — frames binarios [seq:u32BE | ts:u32BE | opus].
+ *   2. opus-decoder (WASM, vendoreado en vendor/) -> PCM f32 48kHz estereo.
+ *      Un solo path para todos los browsers (WebCodecs no existe en Firefox/Safari).
+ *   3. Scheduler sobre AudioContext: buffer 60ms objetivo, encola AudioBufferSource
+ *      por frame. Gaps de seq solo comprimen tiempo (silencio breve, sin drift).
+ *   4. MediaSession + mute local (gain node).
  */
-import { postOffer, postMediaKey } from "./signalling.js";
-import { createRtpSilenceWatchdog } from "./watchdog.js";
+(function () {
+  "use strict";
 
-  // ---- DOM ----
-  const $ = (id) => document.getElementById(id);
-  const playBtn = $("playBtn");
-  const playLabel = $("playLabel");
-  const playIcon = $("playIcon");
-  const hintCtx = $("hintCtx");
-  const wsBadge = $("wsBadge");
-  const audioEl = $("outEl");
-  const muteBtn = $("muteBtn");
-  const muteIcon = $("muteIcon");
-  const muteLabel = $("muteLabel");
-  const mediaKeyBtn = $("mediaKeyBtn");
+  var $ = function (id) { return document.getElementById(id); };
+  var playBtn = $("playBtn"), playLabel = $("playLabel"), playIcon = $("playIcon"),
+    hintCtx = $("hintCtx"), wsBadge = $("wsBadge"),
+    muteBtn = $("muteBtn"), muteIcon = $("muteIcon"), muteLabel = $("muteLabel"),
+    mediaKeyBtn = $("mediaKeyBtn");
 
-  // ---- Estado ----
-  let pc = null;
-  let playing = false;
-  let isMuted = false;
-  let reconnectTimer = null;
-  let reconnectAttempts = 0;
-  let wakeLock = null;
-
-  // ---- Constantes ----
-  const RECONNECT_BASE_MS = 500;
-  const RECONNECT_MAX_MS = 5000;
-  const ICE_SERVERS = [];  // vacio = solo host candidates (LAN pura)
-
-  // ---- Watchdog ----
-  function onSilenceDetected() {
-    watchdog.stop();
-    scheduleReconnect();
+  if (!window.AudioContext && !window.webkitAudioContext) {
+    hintCtx.textContent = "Este navegador no soporta WebAudio.";
+    return;
   }
-  const watchdog = createRtpSilenceWatchdog({ onSilence: onSilenceDetected });
+  if (!window["opus-decoder"]) {
+    hintCtx.textContent = "No cargó el decoder Opus (vendor/opus-decoder.min.js).";
+    return;
+  }
 
-  // ---- Utilidades ----
+  var TARGET_BUF_S = 0.06;         // 60ms de jitter buffer (3 frames de 20ms)
+  var MAX_AHEAD_S = 0.5;           // techo de scheduling (vuelta de background)
+  var RECONNECT_BASE_MS = 500, RECONNECT_MAX_MS = 5000;
+
+  var playing = false, muted = false;
+  var ws = null, audioCtx = null, gainNode = null, opusDecoder = null;
+  var nextStart = 0;               // reloj de scheduling
+  var lastSeq = -1;                // deteccion de huecos (solo log)
+  var lastFrameTs = 0;             // watchdog simple del stream
+  var lastErrTs = 0;               // throttle de errores en UI
+  var reconnectTimer = null, reconnectAttempts = 0;
+
   function log() {
-    var args = Array.prototype.slice.call(arguments);
-    args.unshift("[PyWebRTCSink]");
-    console.log.apply(console, args);
+    var a = Array.prototype.slice.call(arguments);
+    a.unshift("[Sink]");
+    console.log.apply(console, a);
   }
-  function setControlsEnabled(enabled) {
-    [muteBtn, mediaKeyBtn].forEach(function (b) {
-      if (b) b.disabled = !enabled;
-    });
+  function setBadge(t, c) {
+    wsBadge.textContent = t;
+    wsBadge.className = "badge " + (c || "");
+    [muteBtn, mediaKeyBtn].forEach(function (b) { if (b) b.disabled = (c !== "live"); });
   }
-  function setBadge(text, cls) {
-    wsBadge.textContent = text;
-    wsBadge.className = "badge " + (cls || "");
-    if (cls === "off") {
-      setControlsEnabled(false);
-    } else if (cls === "live") {
-      setControlsEnabled(true);
+  function showDecodeError(msg) {
+    log("decodificador:", msg);
+    var now = Date.now();
+    if (now - lastErrTs > 1000) {
+      lastErrTs = now;
+      hintCtx.textContent = "Error de audio: " + msg;
     }
   }
-  function setPlaying(isPlaying) {
-    playing = isPlaying;
-    if (isPlaying) {
-      playBtn.classList.add("playing");
-      playLabel.textContent = "ACTIVO";
-      hintCtx.textContent = "Escuchando audio del PC · WebRTC";
-      playIcon.innerHTML = '<rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/>';
-    } else {
-      playBtn.classList.remove("playing");
-      playLabel.textContent = "ESCUCHAR";
-      hintCtx.textContent = "Toca para escuchar el audio del PC";
-      playIcon.innerHTML = '<path d="M8 5v14l11-7z"/>';
-    }
+  function setPlaying(p) {
+    playing = p;
+    playBtn.classList.toggle("playing", p);
+    playLabel.textContent = p ? "ACTIVO" : "ESCUCHAR";
+    hintCtx.textContent = p ? "Escuchando audio del PC" : "Toca para escuchar el audio del PC";
+    playIcon.innerHTML = p
+      ? '<rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/>'
+      : '<path d="M8 5v14l11-7z"/>';
   }
 
-  // ---- MediaSession API — clave anti-Doze en Android ----
-  // ponytail: browser-specific, no extraer a spec compartida con Android (API difiere).
   function setupMediaSession() {
     if (!("mediaSession" in navigator)) return;
     try {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: "PyWebRTCSink",
-        artist: "PC Loopback (WASAPI)",
-        album: "WebRTC Stream",
-      });
-      navigator.mediaSession.setActionHandler("play", function () {
-        audioEl.play().catch(function (e) { log("Error en play:", e); });
-        if (navigator.mediaSession) navigator.mediaSession.playbackState = "playing";
-      });
-      navigator.mediaSession.setActionHandler("pause", function () {});
-      navigator.mediaSession.setActionHandler("stop", function () {});
+      navigator.mediaSession.metadata = new MediaMetadata({ title: "WasapiSink", artist: "PC Loopback" });
       navigator.mediaSession.playbackState = "playing";
-    } catch (e) {
-      log("MediaSession fallo:", e);
-    }
+      navigator.mediaSession.setActionHandler("play", null);
+      navigator.mediaSession.setActionHandler("pause", function () { if (playing) toggle(); });
+    } catch (e) { }
   }
   function clearMediaSession() {
     if (!("mediaSession" in navigator)) return;
-    try {
-      navigator.mediaSession.metadata = null;
-      navigator.mediaSession.playbackState = "none";
-      try { navigator.mediaSession.setActionHandler("play", null); } catch (e) {}
-      try { navigator.mediaSession.setActionHandler("pause", null); } catch (e) {}
-      try { navigator.mediaSession.setActionHandler("stop", null); } catch (e) {}
-    } catch (e) {}
+    try { navigator.mediaSession.playbackState = "none"; navigator.mediaSession.metadata = null; } catch (e) { }
   }
 
-  // ---- WakeLock (refuerzo) ----
-  async function requestWakeLock() {
-    if (!("wakeLock" in navigator)) return;
-    if (wakeLock) return;
-    try {
-      wakeLock = await navigator.wakeLock.request("screen");
-      wakeLock.addEventListener("release", function () {
-        wakeLock = null;
-        if (playing) requestWakeLock();
-      });
-    } catch (e) {
-      log("WakeLock fallo:", e);
+  function schedulePcm(channelData, frames, sr) {
+    var ch = channelData.length;
+    var buf = audioCtx.createBuffer(ch, frames, sr);
+    for (var c = 0; c < ch; c++) {
+      buf.getChannelData(c).set(channelData[c].subarray(0, frames));
     }
+
+    var now = audioCtx.currentTime;
+    if (nextStart < now + TARGET_BUF_S) nextStart = now + TARGET_BUF_S;  // underrun/restart
+    if (nextStart > now + MAX_AHEAD_S) nextStart = now + TARGET_BUF_S;   // vuelta de background
+    var src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(gainNode);
+    src.start(nextStart);
+    nextStart += frames / sr;
   }
-  function releaseWakeLock() {
-    if (wakeLock) { try { wakeLock.release(); } catch (e) {} wakeLock = null; }
+
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    gainNode = audioCtx.createGain();
+    gainNode.gain.value = muted ? 0 : 1;
+    gainNode.connect(audioCtx.destination);
+    nextStart = 0;
+    lastSeq = -1;
+
+    opusDecoder = new window["opus-decoder"].OpusDecoder();
+    return opusDecoder.ready;
+  }
+  function freeAudio() {
+    if (opusDecoder) { try { opusDecoder.free(); } catch (e) { } opusDecoder = null; }
+    if (audioCtx) { try { audioCtx.close(); } catch (e) { } audioCtx = null; }
+    gainNode = null;
   }
 
-  // ---- Crear RTCPeerConnection + señalizar ----
-  async function negotiate() {
-    pc = new RTCPeerConnection({
-      iceServers: ICE_SERVERS,
-      bundlePolicy: "max-bundle",
-    });
-
-    // Recepcion de track remoto
-    pc.ontrack = function (event) {
-      if (event.track.kind === "audio") {
-        audioEl.srcObject = event.streams[0];
-        event.track.onunmute = function () {
-          watchdog.prime();
-        };
-        audioEl.play().catch(function (e) {
-          log("Audio play fallo:", e.name);
-        });
-      }
-    };
-
-    pc.oniceconnectionstatechange = function () {
-      if (pc.iceConnectionState === "failed") {
-        scheduleReconnect();
-      }
-    };
-    pc.onconnectionstatechange = function () {
-      if (pc.connectionState === "failed") scheduleReconnect();
-      if (pc.connectionState === "connected") {
-        setBadge("Conectado", "live");
-        log("Conectado al servidor");
-        reconnectAttempts = 0;
-        watchdog.start(() => pc.getStats(), () => !!(pc && playing));
-      }
-      if (pc.connectionState === "failed" || pc.connectionState === "closed") {
-        watchdog.stop();
-      }
-    };
-
-    pc.addTransceiver("audio", { direction: "recvonly" });
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    await waitForIceGathering(pc, 2000);
-
-    setBadge("señalizando...", "recon");
-    let answer;
+  function onFrame(data) {
+    if (!data || data.byteLength < 8 || !opusDecoder) return;
+    var v = new DataView(data);
+    var seq = v.getUint32(0, false);
+    // ponytail: ts no se consume (jitter es FIFO puro, decoder WASM no usa timestamps).
+    var opus = new Uint8Array(data, 8);
+    lastFrameTs = Date.now();
+    if (lastSeq !== -1 && seq > lastSeq + 1) {
+      log("hueco seq: " + (lastSeq + 1) + ".." + (seq - 1));
+    }
+    lastSeq = seq;
+    var out;
     try {
-      answer = await postOffer(pc.localDescription);
+      out = opusDecoder.decodeFrame(opus);
     } catch (e) {
-      log("Signalling fallo:", e.message);
-      setBadge(/HTTP/.test(e.message) ? "error server" : "sin server", "off");
-      scheduleReconnect();
+      showDecodeError(e && e.message ? e.message : String(e));
       return;
     }
+    if (out.errors && out.errors.length) {
+      showDecodeError(out.errors[0].message);
+    }
+    if (!out.samplesDecoded || !out.channelData || !out.channelData.length) return;
+    schedulePcm(out.channelData, out.samplesDecoded, out.sampleRate);
+  }
 
-    await pc.setRemoteDescription(answer);
+  function connect() {
+    ws = new WebSocket("ws://" + location.hostname + ":8090");
+    ws.binaryType = "arraybuffer";
     setBadge("conectando...", "recon");
+
+    ws.onopen = function () {
+      setBadge("Conectado", "live");
+      log("WS conectado");
+      reconnectAttempts = 0;
+      lastFrameTs = Date.now();
+    };
+    ws.onmessage = function (ev) { onFrame(ev.data); };
+    ws.onerror = function () { };
+    ws.onclose = function () {
+      log("WS cerrado");
+      setBadge("recon...", "recon");
+      scheduleReconnect();
+    };
   }
 
-  function waitForIceGathering(pc, timeoutMs) {
-    return new Promise(function (resolve) {
-      if (pc.iceGatheringState === "complete") { resolve(); return; }
-      var t = setTimeout(function () {
-        resolve();
-      }, timeoutMs);
-      pc.addEventListener("icegatheringstatechange", function () {
-        if (pc.iceGatheringState === "complete") {
-          clearTimeout(t);
-          resolve();
-        }
-      }, { once: true });
-    });
-  }
-
-  // ---- Reconexion ----
   function scheduleReconnect() {
     if (reconnectTimer) return;
-    watchdog.stop();
-    if (pc) { try { pc.close(); } catch (e) {} pc = null; }
-    const delay = Math.min(
-      RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts),
-      RECONNECT_MAX_MS
-    );
+    var d = Math.min(RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts), RECONNECT_MAX_MS);
     reconnectAttempts++;
-    setBadge("recon en " + Math.round(delay) + "ms", "recon");
     reconnectTimer = setTimeout(function () {
       reconnectTimer = null;
-      if (playing) negotiate();
-    }, delay);
+      // ponytail: decoder sobrevive al reconnect (resincroniza solo); solo se recrea al togglear.
+      if (playing) connect();
+    }, d);
   }
 
-  // ---- Audio Focus recovery: Android puede pausar el <audio> ----
-  audioEl.addEventListener("pause", function () {
-    if (playing && audioEl.paused) {
-      audioEl.play().catch(function (e) {
-        log("Reanudacion post-pause fallo:", e.name);
-      });
-    }
-  });
-
-  // ---- Lifecycle ----
-  document.addEventListener("visibilitychange", function () {
-    if (!document.hidden && playing) {
-      requestWakeLock();
-      if (audioEl.paused) audioEl.play().catch(function () {});
-      if (navigator.mediaSession) navigator.mediaSession.playbackState = "playing";
-    }
-  });
-  if ("onfreeze" in document) {
-    document.addEventListener("resume", function () {
-      if (playing) {
-        requestWakeLock();
-        if (audioEl.paused) audioEl.play().catch(function () {});
-        if (navigator.mediaSession) navigator.mediaSession.playbackState = "playing";
-      }
-    });
-  }
-
-  // ---- Toggle play ----
-  async function togglePlay() {
-    try { navigator.vibrate(10); } catch (e) {}
-
+  function toggle() {
+    try { navigator.vibrate(10); } catch (e) { }
     if (playing) {
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-      watchdog.stop();
-      if (pc) { try { pc.close(); } catch (e) {} pc = null; }
-      releaseWakeLock();
+      if (ws) { ws.onclose = null; try { ws.close(); } catch (e) { } ws = null; }
+      freeAudio();
       clearMediaSession();
-      if (audioEl) { try { audioEl.pause(); } catch (e) {} audioEl.srcObject = null; }
       setPlaying(false);
       setBadge("Desconectado", "off");
       return;
     }
-
     setPlaying(true);
-    setBadge("conectando...", "recon");
-    try {
-      await negotiate();
-      setupMediaSession();
-      requestWakeLock();
-    } catch (e) {
-      log("togglePlay fallo:", e);
-      setBadge("error", "off");
-    }
+    setupMediaSession();
+    setBadge("cargando decoder...", "recon");
+    initAudio().then(function () {
+      if (playing) connect();
+    }).catch(function (e) {
+      log("decoder no listo:", e);
+      setBadge("error decoder", "off");
+      setPlaying(false);
+    });
   }
 
-  // ---- Controles: Silenciar Móvil y Media Key PC ----
-  function updateMuteUi(muted) {
-    isMuted = muted;
-    audioEl.muted = isMuted;
-    if (!muteBtn) return;
-    muteBtn.setAttribute("aria-pressed", String(isMuted));
-    muteBtn.setAttribute("aria-label", isMuted ? "Activar audio móvil" : "Silenciar audio móvil");
-    if (isMuted) {
-      muteBtn.classList.add("active-warn");
-      muteLabel.textContent = "Silenciado";
-      muteIcon.innerHTML = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>';
-    } else {
-      muteBtn.classList.remove("active-warn");
-      muteLabel.textContent = "Silenciar";
-      muteIcon.innerHTML = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>';
-    }
+  // Mute local (gain a 0); preserva sesion via gain node
+  function updateMute(m) {
+    muted = m;
+    if (gainNode) gainNode.gain.value = m ? 0 : 1;
+    muteBtn.classList.toggle("active-warn", m);
+    muteBtn.setAttribute("aria-pressed", String(m));
+    muteLabel.textContent = m ? "Silenciado" : "Silenciar";
+    muteIcon.innerHTML = m
+      ? '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>'
+      : '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>';
   }
+  if (muteBtn) muteBtn.addEventListener("click", function () { try { navigator.vibrate(10); } catch (e) { } updateMute(!muted); });
 
-  function toggleMute() {
-    try { navigator.vibrate(10); } catch (e) {}
-    updateMuteUi(!isMuted);
-  }
-
-  async function sendMediaKey() {
-    if (!mediaKeyBtn || mediaKeyBtn.disabled) return;
-    try { navigator.vibrate([10, 30, 10]); } catch (e) {}
+  if (mediaKeyBtn) mediaKeyBtn.addEventListener("click", function () {
+    if (mediaKeyBtn.disabled) return;
+    try { navigator.vibrate([10, 30, 10]); } catch (e) { }
     mediaKeyBtn.disabled = true;
-    mediaKeyBtn.setAttribute("aria-busy", "true");
     mediaKeyBtn.classList.add("pulse-amber");
-    try {
-      await postMediaKey();
-    } catch (e) {
-      log("Fallo al enviar tecla multimedia:", e.message);
-    } finally {
-      setTimeout(() => {
-        mediaKeyBtn.classList.remove("pulse-amber");
-        mediaKeyBtn.disabled = false;
-        mediaKeyBtn.setAttribute("aria-busy", "false");
-      }, 220);
+    fetch("/api/pc/media-key", { method: "POST" })
+      .catch(function () { log("media-key fallo"); })
+      .finally(function () {
+        setTimeout(function () {
+          mediaKeyBtn.classList.remove("pulse-amber");
+          mediaKeyBtn.disabled = false;
+        }, 220);
+      });
+  });
+
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden && playing && audioCtx && audioCtx.state === "suspended") {
+      audioCtx.resume();
     }
-  }
+  });
 
-  if (muteBtn) muteBtn.addEventListener("click", toggleMute);
-  if (mediaKeyBtn) mediaKeyBtn.addEventListener("click", sendMediaKey);
-
-  // Estado inicial de controles (deshabilitados hasta conexion)
-  setControlsEnabled(false);
-
-  playBtn.addEventListener("click", togglePlay);
-
-  // Debug hook
-  window.PyWebRTCSink = {
-    get pc() { return pc; },
-    get playing() { return playing; },
-    get isMuted() { return isMuted; },
-    toggleMute,
-    sendMediaKey,
-  };
+  playBtn.addEventListener("click", toggle);
+  setBadge("Desconectado", "off");
+})();
